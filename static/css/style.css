@@ -419,6 +419,21 @@ button:active { transform: scale(.97); }
   white-space: nowrap;
 }
 
+/* Camera picture-in-picture overlay on board tab */
+.cam-pip {
+  position: absolute;
+  bottom: 54px;
+  right: 20px;
+  width: 192px;
+  height: 128px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  opacity: 0.9;
+  pointer-events: none;
+  box-shadow: 0 4px 16px rgba(0,0,0,.5);
+}
+
 /* Camera */
 .camera-wrapper {
   flex: 1;

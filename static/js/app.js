@@ -39,6 +39,7 @@ const boardCanvas     = document.getElementById('board-canvas');
 const ctx             = boardCanvas.getContext('2d');
 const clickHint       = document.getElementById('click-hint');
 const camFeed         = document.getElementById('camera-feed');
+const camPip          = document.getElementById('cam-pip');
 const noCameraMsg     = document.getElementById('no-camera-msg');
 const camDot          = document.getElementById('cam-indicator');
 const winnerOverlay   = document.getElementById('winner-overlay');
@@ -60,9 +61,13 @@ socket.on('camera_status', ({ available }) => {
     camFeed.src = '/video_feed';
     noCameraMsg.classList.add('hidden');
     camFeed.classList.remove('hidden');
+    camPip.src = '/video_feed';
+    camPip.classList.remove('hidden');
   } else {
     noCameraMsg.classList.remove('hidden');
     camFeed.classList.add('hidden');
+    camPip.classList.add('hidden');
+    camPip.src = '';
   }
 });
 
@@ -144,6 +149,7 @@ async function startGame() {
   modalSetup.classList.remove('active');
   appDiv.classList.remove('hidden');
   document.getElementById('hdr-mode').textContent = selectedMode.toUpperCase();
+  requestAnimationFrame(() => resizeCanvas());
   renderAll();
 }
 
@@ -730,6 +736,7 @@ function esc(str) {
     gameState = st;
     modalSetup.classList.remove('active');
     appDiv.classList.remove('hidden');
+    requestAnimationFrame(() => resizeCanvas());
     renderAll();
   }
 })();

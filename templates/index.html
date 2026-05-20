@@ -84,12 +84,13 @@
       <!-- Tab bar: Board / Camera -->
       <div class="tab-bar">
         <button class="tab active" data-tab="board">Cible</button>
-        <button class="tab" data-tab="camera" id="tab-camera">Caméra</button>
+        <button class="tab" data-tab="camera">Caméra</button>
       </div>
 
       <div id="tab-board" class="tab-content active">
         <div class="canvas-wrapper">
           <canvas id="board-canvas"></canvas>
+          <img id="cam-pip" src="" alt="" class="cam-pip hidden"/>
           <div id="click-hint" class="click-hint">Cliquez sur la cible pour enregistrer un lancer</div>
         </div>
       </div>
