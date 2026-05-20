@@ -1,0 +1,23 @@
+server:
+  host: "0.0.0.0"
+  port: 5000
+  debug: false
+
+camera:
+  id: 0          # OpenCV device index (0 = default webcam)
+  width: 1280
+  height: 720
+  # Detection tuning
+  diff_threshold: 28    # Pixel difference to consider as "new object"
+  min_contour_area: 40  # Minimum px² area for a dart contour
+
+  # Manual board region – leave null for auto-detection via Hough circles
+  # Set these if auto-detection fails (values in pixels)
+  board_center_x: null
+  board_center_y: null
+  board_radius: null
+
+game:
+  default_mode: "501"
+  double_out: true    # Must finish on a double (standard rule)
+  double_in: false    # Must start with a double (optional strict rule)
