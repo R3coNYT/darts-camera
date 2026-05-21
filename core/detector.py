@@ -15,6 +15,7 @@ Calibration:
                browser click that POSTs to /api/camera/calibrate).
 """
 import math
+import os
 import threading
 import time
 from typing import List, Optional, Tuple
@@ -72,6 +73,8 @@ class DartDetector:
         self._dart_positions: List[Tuple[float, float]] = []
         # Calibration debug: outer edge points used to fit the ellipse
         self._cal_debug_pts: Optional[object] = None
+        # YOLO pose model (chargé en lazy la première fois qu'on en a besoin)
+        self._yolo_model = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -218,7 +221,16 @@ class DartDetector:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
-        # Méthode 1 : intersections des barres métalliques (Shi-Tomasi)
+        # Méthode 0 : YOLO11n-pose (si le modèle entraîné est présent)
+        if self._fit_board_from_yolo(frame):
+            return {
+                "status": "ok",
+                "method": "yolo_pose",
+                "center": list(self.board_center),
+                "radius": self.board_radius,
+            }
+
+        # Méthode 1 : intersections des barres métalliques (HoughLinesP)
         ell = self._fit_board_from_intersections(frame)
 
         if ell is not None:
@@ -286,6 +298,85 @@ class DartDetector:
             "radius": self.board_radius,
             "outer_radius": int(outer_r),
         }
+
+    # ------------------------------------------------------------------
+    # YOLO pose calibration (méthode 0)
+    # ------------------------------------------------------------------
+
+    def _fit_board_from_yolo(self, frame) -> bool:
+        """
+        Utilise un modèle YOLO11n-pose custom entraîné sur la cible de fléchettes.
+        Détecte 5 keypoints :
+          0 : centre (bull)
+          1 : haut du double extérieur
+          2 : droite du double extérieur
+          3 : bas du double extérieur
+          4 : gauche du double extérieur
+
+        Ces 5 points sont passés à calibrate_perspective_manual() qui calcule
+        l'homographie et met à jour board_center / board_radius / board_homography.
+
+        Retourne True si la calibration a réussi.
+        Le modèle est chargé en lazy depuis models/dartboard-pose.pt.
+        Si le fichier n'existe pas, retourne False silencieusement.
+        """
+        # Cherche le modèle dans <projet>/models/dartboard-pose.pt
+        model_path = os.path.join(
+            os.path.dirname(__file__), '..', 'models', 'dartboard-pose.pt'
+        )
+        model_path = os.path.normpath(model_path)
+
+        if not os.path.exists(model_path):
+            return False  # modèle pas encore entraîné → on passe à la méthode suivante
+
+        # Chargement lazy (une seule fois)
+        if self._yolo_model is None:
+            try:
+                from ultralytics import YOLO  # importé ici pour ne pas bloquer si absent
+                self._yolo_model = YOLO(model_path)
+            except Exception:
+                self._yolo_model = None
+                return False
+
+        try:
+            result = self._yolo_model(frame, verbose=False)[0]
+        except Exception:
+            return False
+
+        if result.keypoints is None or len(result.keypoints.xy) == 0:
+            return False
+
+        kpts = result.keypoints.xy[0].cpu().numpy()   # (5, 2)
+
+        # Confiances disponibles ?
+        if result.keypoints.conf is not None:
+            confs = result.keypoints.conf[0].cpu().numpy()
+        else:
+            confs = np.ones(len(kpts), dtype=np.float32)
+
+        if len(kpts) < 5:
+            return False
+
+        # Rejet si confiance < 30 % sur n'importe quel keypoint
+        if np.any(confs[:5] < 0.30):
+            return False
+
+        # YOLO retourne (0, 0) pour les keypoints non détectés
+        if np.any((kpts[:5, 0] == 0) & (kpts[:5, 1] == 0)):
+            return False
+
+        center = (float(kpts[0, 0]), float(kpts[0, 1]))
+        top    = (float(kpts[1, 0]), float(kpts[1, 1]))
+        right  = (float(kpts[2, 0]), float(kpts[2, 1]))
+        bottom = (float(kpts[3, 0]), float(kpts[3, 1]))
+        left   = (float(kpts[4, 0]), float(kpts[4, 1]))
+
+        # Sauvegarde les 5 points pour l'overlay debug (cyan)
+        self._cal_debug_pts = np.array(
+            [center, top, right, bottom, left], dtype=np.float32
+        )
+
+        return self.calibrate_perspective_manual(center, top, right, bottom, left)
 
     def _fit_board_from_intersections(self, frame):
         """

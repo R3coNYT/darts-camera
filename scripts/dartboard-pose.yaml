@@ -1,0 +1,30 @@
+# Dataset configuration for YOLO11n-pose dartboard keypoint detection
+# 5 keypoints per dartboard instance:
+#   0 : centre (bull)
+#   1 : haut  du double extérieur  (12 o'clock)
+#   2 : droite du double extérieur (3 o'clock)
+#   3 : bas   du double extérieur  (6 o'clock)
+#   4 : gauche du double extérieur (9 o'clock)
+#
+# Annotation format (YOLO pose) :  one line per instance
+#   <class> <cx> <cy> <w> <h>  <kp0_x> <kp0_y> <kp0_vis>  ... <kp4_x> <kp4_y> <kp4_vis>
+# All values normalised 0-1.  Visibility : 0=absent, 1=present (no occlusion info needed).
+#
+# Recommended tools for annotation :
+#   - Roboflow (export "YOLO Pose")
+#   - CVAT     (export "YOLO 1.1" → pose)
+#   - Label Studio with YOLO pose template
+
+path: ../datasets/dartboard     # root folder (relative to this yaml)
+train: images/train
+val:   images/val
+
+nc: 1
+names:
+  0: dartboard
+
+# 5 keypoints, each with x/y/visibility
+kpt_shape: [5, 3]
+
+# No horizontal flip symmetry — keypoints are not symmetric (1≠3, 2≠4)
+flip_idx: []
