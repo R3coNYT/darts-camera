@@ -178,42 +178,120 @@ class DartDetector:
 
     def calibrate_auto(self) -> dict:
         """
-        Calibration auto basée sur les anneaux rouge/vert de la cible.
-        On détecte le bord extérieur du double, pas la bordure noire avec les numéros.
+        Calibration auto :
+        1. Essaie de détecter les anneaux rouge/vert.
+        2. Si ça échoue, détecte le cercle extérieur noir avec Hough
+        et réduit le rayon pour tomber sur la zone de score.
         """
         with self._lock:
             if self._current_frame is None:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
+        # Méthode 1 : rouge/vert
         ell = self._fit_scoring_ellipse_from_colors(frame)
 
-        if ell is None:
+        if ell is not None:
+            (ex, ey), (axis_a, axis_b), angle = ell
+
+            self.board_ellipse = ell
+            self.board_center = (int(ex), int(ey))
+            self.board_radius = int((axis_a + axis_b) / 4.0)
+
+            return {
+                "status": "ok",
+                "method": "color_ellipse",
+                "center": list(self.board_center),
+                "radius": self.board_radius,
+                "ellipse": {
+                    "axes": [int(axis_a), int(axis_b)],
+                    "angle": float(angle),
+                },
+            }
+
+        # Méthode 2 : fallback Hough sur le cercle extérieur noir
+        fallback = self._fit_outer_board_circle_hough(frame)
+
+        if fallback is None:
             return {
                 "error": (
-                    "Impossible de détecter correctement les anneaux rouge/vert. "
-                    "Essaie avec plus de lumière ou utilise la calibration manuelle."
+                    "Impossible de détecter la cible. "
+                    "Retire les fléchettes, améliore l'éclairage, puis relance la calibration."
                 )
             }
 
-        (ex, ey), (axis_a, axis_b), angle = ell
+        cx, cy, outer_r = fallback
 
-        self.board_ellipse = ell
-        self.board_center = (int(ex), int(ey))
+        # Le cercle noir complet est plus grand que la zone de score.
+        # En général, la zone de score = environ 75% à 78% du rayon extérieur.
+        SCORE_RATIO = 0.76
 
-        # Rayon moyen uniquement pour l'affichage / fallback.
-        # Pour le scoring, _to_board_norm utilise directement board_ellipse.
-        self.board_radius = int((axis_a + axis_b) / 4.0)
+        self.board_ellipse = None
+        self.board_center = (int(cx), int(cy))
+        self.board_radius = int(outer_r * SCORE_RATIO)
 
         return {
             "status": "ok",
+            "method": "hough_fallback",
             "center": list(self.board_center),
             "radius": self.board_radius,
-            "ellipse": {
-                "axes": [int(axis_a), int(axis_b)],
-                "angle": float(angle),
-            },
+            "outer_radius": int(outer_r),
+            "warning": "Fallback Hough utilisé. Ajuste SCORE_RATIO si le cercle est trop grand/petit.",
         }
+
+    def _fit_outer_board_circle_hough(self, frame):
+        """
+        Détecte le cercle extérieur noir de la cible.
+        Retourne (cx, cy, radius) ou None.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced, (9, 9), 2)
+
+        min_r = int(min(h, w) * 0.25)
+        max_r = int(min(h, w) * 0.80)
+
+        candidates = []
+
+        for param2 in (80, 65, 50, 38, 28, 20):
+            circles = cv2.HoughCircles(
+                blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1.2,
+                minDist=min(h, w) // 3,
+                param1=90,
+                param2=param2,
+                minRadius=min_r,
+                maxRadius=max_r,
+            )
+
+            if circles is None:
+                continue
+
+            for c in circles[0]:
+                cx, cy, r = float(c[0]), float(c[1]), float(c[2])
+
+                # Rejette les cercles trop collés aux bords
+                if cx - r < -50 or cy - r < -50 or cx + r > w + 50 or cy + r > h + 50:
+                    continue
+
+                # Score simple : on préfère une cible assez proche du centre de l'image
+                img_cx, img_cy = w / 2.0, h / 2.0
+                center_dist = math.sqrt((cx - img_cx) ** 2 + (cy - img_cy) ** 2)
+
+                score = -center_dist + r * 0.2
+                candidates.append((score, cx, cy, r))
+
+        if not candidates:
+            return None
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        _score, cx, cy, r = candidates[0]
+
+        return cx, cy, r
 
     def _fit_scoring_ellipse_from_colors(self, frame):
         """
@@ -225,11 +303,10 @@ class DartDetector:
         h, w = hsv.shape[:2]
 
         # Masque rouge : deux plages car le rouge est coupé autour de 0/180 en HSV
-        red_1 = cv2.inRange(hsv, (0, 35, 25), (12, 255, 230))
-        red_2 = cv2.inRange(hsv, (165, 35, 25), (180, 255, 230))
+        red_1 = cv2.inRange(hsv, (0, 55, 20), (12, 255, 255))
+        red_2 = cv2.inRange(hsv, (165, 55, 20), (180, 255, 255))
 
-        # Masque vert de la cible
-        green = cv2.inRange(hsv, (35, 30, 20), (95, 255, 230))
+        green = cv2.inRange(hsv, (38, 45, 20), (92, 255, 255))
 
         mask = cv2.bitwise_or(red_1, red_2)
         mask = cv2.bitwise_or(mask, green)
