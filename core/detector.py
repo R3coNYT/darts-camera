@@ -72,8 +72,6 @@ class DartDetector:
         self._dart_positions: List[Tuple[float, float]] = []
         # Calibration debug: outer edge points used to fit the ellipse
         self._cal_debug_pts: Optional[object] = None
-        # Calibration debug: HSV color mask (red+green zones detected)
-        self._cal_debug_mask: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -182,16 +180,10 @@ class DartDetector:
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 60, 0), -1)
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 255, 255), 2)
 
-            # Points de calibration debug (bord extérieur rouge/vert détectés)
+            # Points de calibration debug (intersections barres détectées)
             if self._cal_debug_pts is not None:
                 for pt in self._cal_debug_pts:
-                    cv2.circle(frame, (int(pt[0]), int(pt[1])), 3, (0, 255, 255), -1)
-
-            # Masque couleur calibration (zones rouge/vert détectées) en overlay cyan
-            if self._cal_debug_mask is not None:
-                overlay = frame.copy()
-                overlay[self._cal_debug_mask > 0] = (0, 255, 255)
-                cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                    cv2.circle(frame, (int(pt[0]), int(pt[1])), 2, (0, 255, 0), -1)
 
         return frame
 
@@ -226,8 +218,8 @@ class DartDetector:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
-        # Méthode 1 : barres métalliques
-        ell = self._fit_board_from_wires(frame)
+        # Méthode 1 : intersections des barres métalliques (Shi-Tomasi)
+        ell = self._fit_board_from_intersections(frame)
 
         if ell is not None:
             (ex, ey), (axis_a, axis_b), angle = ell
@@ -238,7 +230,7 @@ class DartDetector:
 
             return {
                 "status": "ok",
-                "method": "metal_wires",
+                "method": "intersections",
                 "center": list(self.board_center),
                 "radius": self.board_radius,
                 "ellipse": {
@@ -295,252 +287,87 @@ class DartDetector:
             "outer_radius": int(outer_r),
         }
 
-    def _fit_board_from_wires(self, frame):
+    def _fit_board_from_intersections(self, frame):
         """
-        Détecte les barres métalliques radiales.
-        Les barres servent à trouver le centre, puis le rayon est estimé
-        en testant les anneaux connus de la cible.
-        """
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
-        min_dim = min(h, w)
-
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-
-        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
-        edges = cv2.Canny(blurred, 45, 140)
-
-        lines = cv2.HoughLinesP(
-            edges,
-            rho=1,
-            theta=np.pi / 180,
-            threshold=55,
-            minLineLength=int(min_dim * 0.08),
-            maxLineGap=22,
-        )
-
-        if lines is None:
-            return None
-
-        detected_lines = []
-
-        def make_line(x1, y1, x2, y2):
-            dx = x2 - x1
-            dy = y2 - y1
-            length = math.hypot(dx, dy)
-
-            if length < min_dim * 0.08:
-                return None
-
-            A = dy
-            B = -dx
-            C = dx * y1 - dy * x1
-
-            norm = math.hypot(A, B)
-            if norm == 0:
-                return None
-
-            A /= norm
-            B /= norm
-            C /= norm
-
-            angle = math.atan2(dy, dx) % math.pi
-
-            return {
-                "p1": (float(x1), float(y1)),
-                "p2": (float(x2), float(y2)),
-                "length": length,
-                "angle": angle,
-                "A": A,
-                "B": B,
-                "C": C,
-            }
-
-        for l in lines[:, 0]:
-            line = make_line(l[0], l[1], l[2], l[3])
-            if line is not None:
-                detected_lines.append(line)
-
-        if len(detected_lines) < 6:
-            return None
-
-        def intersect(l1, l2):
-            A1, B1, C1 = l1["A"], l1["B"], l1["C"]
-            A2, B2, C2 = l2["A"], l2["B"], l2["C"]
-
-            det = A1 * B2 - A2 * B1
-            if abs(det) < 1e-6:
-                return None
-
-            x = (B1 * C2 - B2 * C1) / det
-            y = (C1 * A2 - C2 * A1) / det
-
-            return x, y
-
-        intersections = []
-
-        for i in range(len(detected_lines)):
-            for j in range(i + 1, len(detected_lines)):
-                l1 = detected_lines[i]
-                l2 = detected_lines[j]
-
-                diff = abs(l1["angle"] - l2["angle"])
-                diff = min(diff, math.pi - diff)
-
-                # Ignore les lignes presque parallèles
-                if diff < math.radians(15):
-                    continue
-
-                p = intersect(l1, l2)
-                if p is None:
-                    continue
-
-                x, y = p
-
-                if 0 <= x < w and 0 <= y < h:
-                    intersections.append((x, y))
-
-        if len(intersections) < 10:
-            return None
-
-        intersections = np.array(intersections, dtype=np.float32)
-
-        # On cherche la zone où les intersections sont les plus concentrées.
-        bin_size = max(14, int(min_dim * 0.025))
-        bins = np.floor(intersections / bin_size).astype(np.int32)
-
-        unique_bins, counts = np.unique(bins, axis=0, return_counts=True)
-        best_bin = unique_bins[np.argmax(counts)]
-
-        center_guess = (best_bin.astype(np.float32) + 0.5) * bin_size
-        distances = np.linalg.norm(intersections - center_guess, axis=1)
-
-        cluster = intersections[distances < bin_size * 3.0]
-
-        if len(cluster) < 8:
-            return None
-
-        cx, cy = np.median(cluster, axis=0)
-
-        # On garde seulement les vraies lignes radiales qui passent près du centre.
-        radial_lines = []
-        max_center_dist = max(10, int(min_dim * 0.035))
-
-        for l in detected_lines:
-            dist_to_center = abs(l["A"] * cx + l["B"] * cy + l["C"])
-            if dist_to_center <= max_center_dist:
-                radial_lines.append(l)
-
-        if len(radial_lines) < 5:
-            return None
-
-        # Le rayon n'est PAS pris avec les extrémités des lignes.
-        # On le recalcule en cherchant le meilleur alignement des anneaux.
-        radius = self._estimate_radius_from_known_rings(frame, float(cx), float(cy))
-
-        if radius is None:
-            return None
-
-        # On retourne une ellipse circulaire propre.
-        # Si plus tard tu veux gérer une caméra très inclinée, on pourra remplacer
-        # ça par une vraie homographie.
-        return (
-            (float(cx), float(cy)),
-            (float(radius * 2), float(radius * 2)),
-            0.0,
-        )
-
-    def _estimate_radius_from_known_rings(self, frame, cx: float, cy: float):
-        """
-        Estime le rayon extérieur de la zone de score.
-        On teste plusieurs rayons et on garde celui dont les anneaux connus
-        tombent le mieux sur des contours détectés.
+        Détecte les intersections des barres métalliques de la cible via
+        Shi-Tomasi corner detection, filtre les coins par densité pour isoler
+        la zone de la cible, puis ajuste une ellipse sur les points les plus
+        externes (bord du double ring).
+        Tous les points gardés sont sauvegardés dans _cal_debug_pts.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
-        min_dim = min(h, w)
 
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
 
-        blurred = cv2.GaussianBlur(enhanced, (9, 9), 2)
-        edges = cv2.Canny(blurred, 30, 100)
+        # Shi-Tomasi : les intersections de barres créent des coins très forts
+        corners = cv2.goodFeaturesToTrack(
+            enhanced,
+            maxCorners=700,
+            qualityLevel=0.003,
+            minDistance=6,
+            blockSize=5,
+        )
 
-        # Proportions de ta cible déjà utilisées dans get_current_frame()
-        ring_fracs = (0.094, 0.582, 0.629, 0.953, 1.000)
+        if corners is None or len(corners) < 40:
+            self._cal_debug_pts = None
+            return None
 
-        min_r = int(min_dim * 0.22)
-        max_r = int(min_dim * 0.55)
+        pts = corners.reshape(-1, 2).astype(np.float32)
 
-        # Évite de tester des rayons impossibles par rapport à la position du centre.
-        max_by_bounds = int(min(
-            max(cx, w - cx),
-            max(cy, h - cy),
-            min_dim * 0.58,
-        ))
+        # Filtrage par densité : la cible est bien plus dense en coins que l'arrière-plan.
+        NEIGH_R   = 35.0
+        MIN_NEIGH = 5
+        diff         = pts[:, np.newaxis, :] - pts[np.newaxis, :, :]  # (N, N, 2)
+        dist_mat     = np.sqrt((diff ** 2).sum(axis=2))                # (N, N)
+        neigh_count  = (dist_mat < NEIGH_R).sum(axis=1) - 1           # exclure soi-même
+        dense        = pts[neigh_count >= MIN_NEIGH]
 
-        max_r = min(max_r, max_by_bounds)
+        if len(dense) < 25:
+            self._cal_debug_pts = pts   # afficher tout pour diagnostic
+            return None
 
-        best_score = -1
-        best_r = None
+        self._cal_debug_pts = dense
 
-        for r in range(min_r, max_r + 1):
-            total_score = 0.0
-            valid_rings = 0
+        # Centre robuste via médiane (résiste aux outliers)
+        cx0 = float(np.median(dense[:, 0]))
+        cy0 = float(np.median(dense[:, 1]))
+        dx  = dense[:, 0] - cx0
+        dy  = dense[:, 1] - cy0
+        dist    = np.sqrt(dx * dx + dy * dy)
+        angles  = (np.degrees(np.arctan2(dy, dx)) + 360.0) % 360.0
 
-            for frac in ring_fracs:
-                rr = max(3, int(r * frac))
-                dr = max(2, int(r * 0.012))
-
-                annulus = np.zeros((h, w), dtype=np.uint8)
-
-                cv2.circle(
-                    annulus,
-                    (int(cx), int(cy)),
-                    rr + dr,
-                    255,
-                    -1,
-                )
-
-                cv2.circle(
-                    annulus,
-                    (int(cx), int(cy)),
-                    max(0, rr - dr),
-                    0,
-                    -1,
-                )
-
-                area = cv2.countNonZero(annulus)
-                if area == 0:
-                    continue
-
-                edge_count = cv2.countNonZero(
-                    cv2.bitwise_and(edges, edges, mask=annulus)
-                )
-
-                density = edge_count / area
-
-                total_score += density
-                valid_rings += 1
-
-            if valid_rings == 0:
+        # Pour chaque tranche de 9°, garder le point le plus éloigné du centre
+        # → ces points tracent le bord extérieur du double ring
+        outer_pts = []
+        for b in range(40):
+            a_min = b * 9.0
+            a_max = a_min + 9.0
+            idx = np.where((angles >= a_min) & (angles < a_max))[0]
+            if len(idx) == 0:
                 continue
+            outer_pts.append(dense[idx[np.argmax(dist[idx])]])
 
-            score = total_score / valid_rings
-
-            if score > best_score:
-                best_score = score
-                best_r = r
-
-        if best_r is None:
+        if len(outer_pts) < 12:
             return None
 
-        # Sécurité : si le score est vraiment trop faible, on considère que ça a raté.
-        if best_score < 0.025:
+        outer_pts = np.array(outer_pts, dtype=np.float32)
+        try:
+            ell = cv2.fitEllipse(outer_pts.reshape(-1, 1, 2))
+        except cv2.error:
             return None
 
-        return int(best_r)
+        (ex, ey), (axis_a, axis_b), angle = ell
+        sm = min(axis_a, axis_b)
+        bg = max(axis_a, axis_b)
+
+        if sm < min(h, w) * 0.20:              return None
+        if bg > min(h, w) * 1.10:              return None
+        if bg / sm > 2.5:                       return None
+        if not (0 <= ex < w and 0 <= ey < h):   return None
+
+        return ell
 
     def _fit_outer_board_circle_hough(self, frame):
         """
