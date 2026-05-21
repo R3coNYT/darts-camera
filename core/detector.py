@@ -178,17 +178,37 @@ class DartDetector:
 
     def calibrate_auto(self) -> dict:
         """
-        Calibration auto :
-        1. Essaie de détecter les anneaux rouge/vert.
-        2. Si ça échoue, détecte le cercle extérieur noir avec Hough
-        et réduit le rayon pour tomber sur la zone de score.
+        Calibration auto basée d'abord sur les barres métalliques de la cible.
+        Les barres radiales servent à trouver le vrai centre, puis leurs extrémités
+        servent à retrouver le bord extérieur de la zone de score.
         """
         with self._lock:
             if self._current_frame is None:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
-        # Méthode 1 : rouge/vert
+        # Méthode 1 : barres métalliques
+        ell = self._fit_board_from_wires(frame)
+
+        if ell is not None:
+            (ex, ey), (axis_a, axis_b), angle = ell
+
+            self.board_ellipse = ell
+            self.board_center = (int(ex), int(ey))
+            self.board_radius = int((axis_a + axis_b) / 4.0)
+
+            return {
+                "status": "ok",
+                "method": "metal_wires",
+                "center": list(self.board_center),
+                "radius": self.board_radius,
+                "ellipse": {
+                    "axes": [int(axis_a), int(axis_b)],
+                    "angle": float(angle),
+                },
+            }
+
+        # Méthode 2 : fallback rouge/vert
         ell = self._fit_scoring_ellipse_from_colors(frame)
 
         if ell is not None:
@@ -209,21 +229,19 @@ class DartDetector:
                 },
             }
 
-        # Méthode 2 : fallback Hough sur le cercle extérieur noir
+        # Méthode 3 : fallback cercle extérieur
         fallback = self._fit_outer_board_circle_hough(frame)
 
         if fallback is None:
             return {
                 "error": (
                     "Impossible de détecter la cible. "
-                    "Retire les fléchettes, améliore l'éclairage, puis relance la calibration."
+                    "Essaie sans fléchettes, avec plus de lumière, ou utilise la calibration manuelle."
                 )
             }
 
         cx, cy, outer_r = fallback
 
-        # Le cercle noir complet est plus grand que la zone de score.
-        # En général, la zone de score = environ 75% à 78% du rayon extérieur.
         SCORE_RATIO = 0.76
 
         self.board_ellipse = None
@@ -236,8 +254,218 @@ class DartDetector:
             "center": list(self.board_center),
             "radius": self.board_radius,
             "outer_radius": int(outer_r),
-            "warning": "Fallback Hough utilisé. Ajuste SCORE_RATIO si le cercle est trop grand/petit.",
         }
+
+    def _fit_board_from_wires(self, frame):
+        """
+        Détecte les barres métalliques radiales de la cible.
+        - Les intersections donnent le centre.
+        - Les extrémités extérieures donnent l'ellipse du bord de score.
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        blurred = cv2.GaussianBlur(enhanced, (5, 5), 0)
+        edges = cv2.Canny(blurred, 45, 140)
+
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=55,
+            minLineLength=int(min(h, w) * 0.09),
+            maxLineGap=18,
+        )
+
+        if lines is None:
+            return None
+
+        detected_lines = []
+
+        def make_line(x1, y1, x2, y2):
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.hypot(dx, dy)
+
+            if length < min(h, w) * 0.09:
+                return None
+
+            # Ligne sous forme Ax + By + C = 0
+            A = dy
+            B = -dx
+            C = dx * y1 - dy * x1
+
+            norm = math.hypot(A, B)
+            if norm == 0:
+                return None
+
+            A /= norm
+            B /= norm
+            C /= norm
+
+            # angle non orienté, entre 0 et pi
+            angle = math.atan2(dy, dx) % math.pi
+
+            return {
+                "p1": (float(x1), float(y1)),
+                "p2": (float(x2), float(y2)),
+                "length": length,
+                "angle": angle,
+                "A": A,
+                "B": B,
+                "C": C,
+            }
+
+        for l in lines[:, 0]:
+            x1, y1, x2, y2 = l
+            line = make_line(x1, y1, x2, y2)
+            if line is not None:
+                detected_lines.append(line)
+
+        if len(detected_lines) < 6:
+            return None
+
+        def intersect(l1, l2):
+            A1, B1, C1 = l1["A"], l1["B"], l1["C"]
+            A2, B2, C2 = l2["A"], l2["B"], l2["C"]
+
+            det = A1 * B2 - A2 * B1
+            if abs(det) < 1e-6:
+                return None
+
+            x = (B1 * C2 - B2 * C1) / det
+            y = (C1 * A2 - C2 * A1) / det
+
+            return x, y
+
+        # 1) Trouver le centre par intersections des barres radiales
+        intersections = []
+
+        for i in range(len(detected_lines)):
+            for j in range(i + 1, len(detected_lines)):
+                l1 = detected_lines[i]
+                l2 = detected_lines[j]
+
+                diff = abs(l1["angle"] - l2["angle"])
+                diff = min(diff, math.pi - diff)
+
+                # On ignore les lignes presque parallèles
+                if diff < math.radians(15):
+                    continue
+
+                p = intersect(l1, l2)
+                if p is None:
+                    continue
+
+                x, y = p
+
+                if not (0 <= x < w and 0 <= y < h):
+                    continue
+
+                intersections.append((x, y))
+
+        if len(intersections) < 10:
+            return None
+
+        intersections = np.array(intersections, dtype=np.float32)
+
+        # Regroupement simple : on prend la zone où il y a le plus d'intersections
+        bin_size = max(14, int(min(h, w) * 0.025))
+        bins = np.floor(intersections / bin_size).astype(np.int32)
+
+        unique_bins, counts = np.unique(bins, axis=0, return_counts=True)
+        best_bin = unique_bins[np.argmax(counts)]
+
+        best_center_guess = (best_bin.astype(np.float32) + 0.5) * bin_size
+        distances = np.linalg.norm(intersections - best_center_guess, axis=1)
+
+        cluster = intersections[distances < bin_size * 3.0]
+
+        if len(cluster) < 8:
+            return None
+
+        cx, cy = np.median(cluster, axis=0)
+
+        # 2) Garder seulement les lignes qui passent près du centre
+        radial_lines = []
+        max_center_dist = max(12, int(min(h, w) * 0.045))
+
+        for l in detected_lines:
+            dist_to_center = abs(l["A"] * cx + l["B"] * cy + l["C"])
+            if dist_to_center <= max_center_dist:
+                radial_lines.append(l)
+
+        if len(radial_lines) < 5:
+            return None
+
+        # 3) Récupérer les extrémités des barres pour approximer le bord extérieur
+        endpoint_points = []
+        endpoint_distances = []
+
+        for l in radial_lines:
+            for p in (l["p1"], l["p2"]):
+                px, py = p
+                d = math.hypot(px - cx, py - cy)
+
+                if d > min(h, w) * 0.12:
+                    endpoint_points.append((px, py))
+                    endpoint_distances.append(d)
+
+        if len(endpoint_points) < 10:
+            return None
+
+        endpoint_points = np.array(endpoint_points, dtype=np.float32)
+        endpoint_distances = np.array(endpoint_distances, dtype=np.float32)
+
+        # Distance extérieure estimée : on prend les points les plus éloignés du centre
+        r_est = np.percentile(endpoint_distances, 85)
+
+        keep = (
+            (endpoint_distances > r_est * 0.72)
+            & (endpoint_distances < r_est * 1.18)
+        )
+
+        rim_points = endpoint_points[keep]
+
+        if len(rim_points) < 8:
+            return None
+
+        try:
+            ell = cv2.fitEllipse(rim_points.reshape(-1, 1, 2))
+        except cv2.error:
+            return None
+
+        (ex, ey), (axis_a, axis_b), angle = ell
+
+        small_axis = min(axis_a, axis_b)
+        big_axis = max(axis_a, axis_b)
+
+        if small_axis < min(h, w) * 0.25:
+            return None
+
+        if big_axis > min(h, w) * 1.25:
+            return None
+
+        if big_axis / small_axis > 2.4:
+            return None
+
+        # Le centre donné par les intersections est souvent plus fiable
+        center_drift = math.hypot(ex - cx, ey - cy)
+
+        if center_drift > min(h, w) * 0.08:
+            ex, ey = float(cx), float(cy)
+
+        # Petite marge pour tomber sur le bord extérieur du double
+        SCALE = 1.02
+
+        return (
+            (float(ex), float(ey)),
+            (float(axis_a * SCALE), float(axis_b * SCALE)),
+            float(angle),
+        )
 
     def _fit_outer_board_circle_hough(self, frame):
         """
