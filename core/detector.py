@@ -72,6 +72,8 @@ class DartDetector:
         self._dart_positions: List[Tuple[float, float]] = []
         # Calibration debug: outer edge points used to fit the ellipse
         self._cal_debug_pts: Optional[object] = None
+        # Calibration debug: HSV color mask (red+green zones detected)
+        self._cal_debug_mask: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -184,6 +186,12 @@ class DartDetector:
             if self._cal_debug_pts is not None:
                 for pt in self._cal_debug_pts:
                     cv2.circle(frame, (int(pt[0]), int(pt[1])), 3, (0, 255, 255), -1)
+
+            # Masque couleur calibration (zones rouge/vert détectées) en overlay cyan
+            if self._cal_debug_mask is not None:
+                overlay = frame.copy()
+                overlay[self._cal_debug_mask > 0] = (0, 255, 255)
+                cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
 
         return frame
 
@@ -610,6 +618,7 @@ class DartDetector:
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        self._cal_debug_mask = mask  # save for live overlay
 
         cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
