@@ -106,6 +106,17 @@ socket.on('auto_detect_status', ({ active }) => {
   setDetectState(active ? 'listening' : 'idle', active ? 'Écoute en cours…' : 'Prêt');
 });
 
+socket.on('calibration_result', result => {
+  const msg = document.getElementById('cal-status-text');
+  if (result.error) {
+    if (msg) msg.textContent = '⚠ ' + result.error;
+    showToast('Calibration : ' + result.error, 'bust');
+  } else {
+    if (msg) msg.textContent = `Cible calibrée ✓  r=${result.radius}px`;
+    showToast(`Calibration auto ✓  r=${result.radius}px`, 'info');
+  }
+});
+
 // ============================================================
 //   SETUP MODAL
 // ============================================================

@@ -182,15 +182,12 @@ class DartDetector:
 
         Strategy
         --------
-        1. Hough circles (PRIMARY) – robust to background clutter; the board's
-           circular rim accumulates far more votes than any wall structure.
-        2. Tight-annulus ellipse fit (REFINE) – once the Hough circle locates
-           the board centre and radius, fit an ellipse to edge pixels within
-           93–107 % of that radius so that perspective distortion is captured
-           without pulling in irrelevant wall edges.
-        3. Center-drift validation – the refined ellipse centre must stay within
-           25 % of the Hough radius from the Hough centre; otherwise keep the
-           plain circle from step 1.
+        1. Hough circles across a broad radius range (15 %–82 % of frame) so
+           that boards which fill most of the frame are found correctly.
+        2. All candidates from all Hough parameter sweeps are scored with the
+           ring-structure metric and the globally best one is kept.
+        3. A tight-annulus (90 %–110 %) ellipse fit refines the circle to an
+           ellipse that captures camera angle, validated against centre drift.
         """
         with self._lock:
             if self._current_frame is None:
@@ -201,43 +198,43 @@ class DartDetector:
         h, w = gray.shape
 
         img_cx, img_cy = w // 2, h // 2
-        # Board centre may be up to 45 % of the shorter dimension off-centre.
-        max_center_dist = min(h, w) * 0.45
+        max_center_dist = min(h, w) * 0.50   # board centre may be up to half-width off
 
         clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         blurred  = cv2.GaussianBlur(enhanced, (9, 9), 2)
-        edges    = cv2.Canny(blurred, 40, 120)
+        edges    = cv2.Canny(blurred, 30, 100)
 
-        # Reasonable board size: 15 %–60 % of the shorter frame dimension.
+        # Allow boards from 15 % up to 82 % of the shorter frame dimension.
+        # 82 % at 720 p ≈ 590 px  →  covers boards that nearly fill the frame.
         min_r = int(min(h, w) * 0.15)
-        max_r = int(min(h, w) * 0.60)
+        max_r = int(min(h, w) * 0.82)
 
         # ── Ring-structure scorer ──────────────────────────────────────────────
-        # Measures edge density in thin annuli at the known ring positions of a
-        # standard dartboard (fractions of outer double-ring radius).
         _FRACS = (0.09, 0.57, 0.63, 0.95, 1.00)
-        _HW    = 0.05   # annulus half-width as fraction of r
+        _HW    = 0.05
 
         def ring_score(cx_, cy_, r_):
             log_sum = 0.0
+            n_valid = 0
             for f in _FRACS:
-                rr  = max(3, int(r_ * f))
-                dr  = max(2, int(r_ * _HW))
-                ann = np.zeros((h, w), dtype=np.uint8)
+                rr   = max(3, int(r_ * f))
+                dr   = max(2, int(r_ * _HW))
+                ann  = np.zeros((h, w), dtype=np.uint8)
                 cv2.circle(ann, (int(cx_), int(cy_)), rr + dr, 255, -1)
                 cv2.circle(ann, (int(cx_), int(cy_)), max(0, rr - dr), 0, -1)
-                n    = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=ann))
                 area = cv2.countNonZero(ann)
-                log_sum += math.log(n / area if area > 0 else 1e-9)
-            return log_sum / len(_FRACS)
+                if area == 0:
+                    continue
+                n    = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=ann))
+                log_sum += math.log(max(n, 1) / area)
+                n_valid += 1
+            return log_sum / n_valid if n_valid else float('-inf')
 
-        # ── Tight-annulus ellipse fit ─────────────────────────────────────────
-        # Uses only the outer double-ring edge (93 %–107 % of r) so that wall
-        # and pillar edges outside the board cannot distort the fit.
-        def fit_rim_ellipse_tight(cx_, cy_, r_):
-            inner = max(1, int(r_ * 0.93))
-            outer = int(r_ * 1.07)
+        # ── Tight-annulus ellipse refinement ──────────────────────────────────
+        def fit_rim_ellipse(cx_, cy_, r_):
+            inner = max(1, int(r_ * 0.90))
+            outer = int(r_ * 1.10)
             ann   = np.zeros((h, w), dtype=np.uint8)
             cv2.circle(ann, (int(cx_), int(cy_)), outer, 255, -1)
             cv2.circle(ann, (int(cx_), int(cy_)), inner, 0, -1)
@@ -258,17 +255,25 @@ class DartDetector:
                 return None
             return ell
 
-        # ── Step 1: Hough circles (primary, robust to clutter) ────────────────
-        best_cx = best_cy = best_r = None
-        best_rs = float('-inf')
+        # ── Step 1: Hough circles – collect & score ALL candidates ────────────
+        # Use dp=1 (full-resolution accumulator) and sweep param2 from strict
+        # to lenient; score every unique candidate and keep the global best.
+        candidates: list = []   # (ring_score, cx, cy, r)
+        seen: list = []          # (cx, cy, r) already evaluated
 
-        # Try increasingly lenient accumulator thresholds until we find something.
-        for param2 in (65, 50, 38, 28):
+        def already_seen(cx_, cy_, cr_):
+            for scx, scy, scr in seen:
+                if (abs(cx_ - scx) < 20 and abs(cy_ - scy) < 20
+                        and abs(cr_ - scr) < 30):
+                    return True
+            return False
+
+        for param2 in (60, 45, 35, 25, 18):
             circles = cv2.HoughCircles(
                 blurred, cv2.HOUGH_GRADIENT,
-                dp=1.5,
-                minDist=min(h, w) // 2,   # expect at most one board per frame
-                param1=100, param2=param2,
+                dp=1,
+                minDist=max(min_r, min(h, w) // 3),
+                param1=80, param2=param2,
                 minRadius=min_r, maxRadius=max_r,
             )
             if circles is None:
@@ -277,14 +282,13 @@ class DartDetector:
                 ccx, ccy, cr = float(c[0]), float(c[1]), float(c[2])
                 if math.sqrt((ccx - img_cx) ** 2 + (ccy - img_cy) ** 2) > max_center_dist:
                     continue
+                if already_seen(ccx, ccy, cr):
+                    continue
+                seen.append((ccx, ccy, cr))
                 s = ring_score(ccx, ccy, cr)
-                if s > best_rs:
-                    best_rs = s
-                    best_cx, best_cy, best_r = ccx, ccy, cr
-            if best_cx is not None:
-                break   # first param2 that finds a valid candidate is enough
+                candidates.append((s, ccx, ccy, cr))
 
-        if best_cx is None:
+        if not candidates:
             return {
                 "error": (
                     "Aucune cible détectée. "
@@ -292,13 +296,16 @@ class DartDetector:
                 )
             }
 
-        # ── Step 2: Ellipse refinement (tight annulus only) ───────────────────
-        ell = fit_rim_ellipse_tight(best_cx, best_cy, best_r)
+        # Best ring-structure score wins.
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_rs, best_cx, best_cy, best_r = candidates[0]
+
+        # ── Step 2: Ellipse refinement ────────────────────────────────────────
+        ell = fit_rim_ellipse(best_cx, best_cy, best_r)
         if ell is not None:
             (ex, ey), (ma, mi), _ = ell
-            # Reject if the fitted centre drifted too far from the Hough estimate.
             drift = math.sqrt((ex - best_cx) ** 2 + (ey - best_cy) ** 2)
-            if drift < best_r * 0.25:
+            if drift < best_r * 0.30:
                 self.board_ellipse = ell
                 self.board_center  = (int(ex), int(ey))
                 self.board_radius  = int((ma + mi) / 4.0)
@@ -307,7 +314,6 @@ class DartDetector:
                     "center": list(self.board_center),
                     "radius": self.board_radius,
                 }
-            # Drift too large – fall through to plain circle.
 
         # ── Step 3: Plain circle fallback ─────────────────────────────────────
         self.board_ellipse = None

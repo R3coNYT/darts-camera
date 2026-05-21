@@ -223,6 +223,14 @@ def new_game():
     current_game = Game(mode=mode, player_names=players, double_in=double_in, double_out=double_out)
     state = current_game.get_state()
     socketio.emit("game_state", state)
+
+    # Auto-calibrate once at game start (non-blocking)
+    if detector and detector._current_frame is not None:
+        def _do_calibrate():
+            result = detector.calibrate_auto()
+            socketio.emit("calibration_result", result)
+        socketio.start_background_task(_do_calibrate)
+
     return jsonify(state)
 
 
