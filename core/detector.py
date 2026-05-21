@@ -212,8 +212,8 @@ class DartDetector:
             "ellipse": {
                 "axes": [int(axis_a), int(axis_b)],
                 "angle": float(angle),
-        },
-    }
+            },
+        }
 
     def _fit_scoring_ellipse_from_colors(self, frame):
         """

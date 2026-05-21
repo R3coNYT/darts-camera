@@ -30,9 +30,6 @@ let currentMult     = 1;
 let selectedMode    = '501';
 let cameraAvailable = false;
 let autoDetectActive = false;
-let calMode         = false;   // true while 2-click manual calibration is active
-let calStep         = 0;       // 0 = awaiting centre click, 1 = awaiting edge click
-let calCentre       = null;    // {fx, fy, cssX, cssY} – first click in frame + css px
 
 // ── DOM refs ───────────────────────────────────────────────────────
 const modalSetup      = document.getElementById('modal-setup');
@@ -45,8 +42,6 @@ const camPip          = document.getElementById('cam-pip');
 const noCameraMsg     = document.getElementById('no-camera-msg');
 const camDot          = document.getElementById('cam-indicator');
 const camWrap         = document.getElementById('cam-wrap');
-const camOverlay      = document.getElementById('cam-overlay');
-let   ovCtx           = null;
 const winnerOverlay   = document.getElementById('winner-overlay');
 const winnerNameEl    = document.getElementById('winner-name');
 const toastContainer  = document.createElement('div');
@@ -673,130 +668,7 @@ document.querySelectorAll('.tab-bar .tab').forEach(tab => {
   });
 });
 
-// ============================================================
-//   CAMERA OVERLAY – manual calibration helpers
-// ============================================================
 
-function initOverlay() {
-  if (!camOverlay || !camWrap) return;
-  camOverlay.width  = camWrap.offsetWidth  || camWrap.clientWidth;
-  camOverlay.height = camWrap.offsetHeight || camWrap.clientHeight;
-  ovCtx = camOverlay.getContext('2d');
-}
-
-function clearOverlay() {
-  if (!ovCtx) initOverlay();
-  if (ovCtx) ovCtx.clearRect(0, 0, camOverlay.width, camOverlay.height);
-}
-
-// Convert a mouse event on #cam-wrap to video-frame pixel coords.
-function clickToFrame(e) {
-  const rect  = camWrap.getBoundingClientRect();
-  const cssX  = e.clientX - rect.left;
-  const cssY  = e.clientY - rect.top;
-  const frameW = camFeed.naturalWidth  || 1280;
-  const frameH = camFeed.naturalHeight || 720;
-  return {
-    fx:   cssX / rect.width  * frameW,
-    fy:   cssY / rect.height * frameH,
-    cssX, cssY,
-    scaleX: rect.width  / frameW,
-    scaleY: rect.height / frameH,
-  };
-}
-
-function drawCrossHair(cx, cy) {
-  if (!ovCtx) return;
-  ovCtx.save();
-  ovCtx.strokeStyle = '#00e5ff';
-  ovCtx.lineWidth   = 2;
-  ovCtx.shadowColor = '#00e5ff';
-  ovCtx.shadowBlur  = 6;
-  ovCtx.beginPath();
-  ovCtx.moveTo(cx - 22, cy); ovCtx.lineTo(cx + 22, cy);
-  ovCtx.moveTo(cx, cy - 22); ovCtx.lineTo(cx, cy + 22);
-  ovCtx.stroke();
-  ovCtx.beginPath();
-  ovCtx.arc(cx, cy, 7, 0, Math.PI * 2);
-  ovCtx.stroke();
-  ovCtx.restore();
-}
-
-function drawRadiusPreview(cx, cy, rCss, labelText) {
-  if (!ovCtx) return;
-  ovCtx.save();
-  ovCtx.strokeStyle = '#ff6b35';
-  ovCtx.lineWidth   = 2;
-  ovCtx.setLineDash([5, 5]);
-  ovCtx.shadowColor = '#ff6b35';
-  ovCtx.shadowBlur  = 6;
-  ovCtx.beginPath();
-  ovCtx.arc(cx, cy, rCss, 0, Math.PI * 2);
-  ovCtx.stroke();
-  ovCtx.setLineDash([]);
-  ovCtx.fillStyle = '#ff6b35';
-  ovCtx.font      = 'bold 12px monospace';
-  ovCtx.fillText(labelText, cx + rCss * 0.72 + 6, cy - rCss * 0.72 - 4);
-  ovCtx.restore();
-}
-
-function cancelCal() {
-  calMode = false;
-  calStep = 0;
-  calCentre = null;
-  clearOverlay();
-  if (camWrap) camWrap.style.cursor = '';
-  const msg = document.getElementById('cal-status-text');
-  if (msg) msg.textContent = '';
-}
-
-// ESC cancels calibration
-document.addEventListener('keydown', e => { if (e.key === 'Escape') cancelCal(); });
-
-// ── Live radius preview while hovering after centre click ────────
-camWrap?.addEventListener('mousemove', e => {
-  if (!calMode || calStep !== 1 || !calCentre) return;
-  const { fx, fy, cssX, cssY, scaleX, scaleY } = clickToFrame(e);
-  const rFr  = Math.hypot(fx - calCentre.fx, fy - calCentre.fy);
-  const rCss = Math.hypot(cssX - calCentre.cssX, cssY - calCentre.cssY);
-  clearOverlay();
-  drawCrossHair(calCentre.cssX, calCentre.cssY);
-  drawRadiusPreview(calCentre.cssX, calCentre.cssY, rCss, `r=${Math.round(rFr)}px`);
-});
-
-// ── Click handler: 2-click calibration ───────────────────────────
-camWrap?.addEventListener('click', async e => {
-  if (!calMode) return;
-  const { fx, fy, cssX, cssY } = clickToFrame(e);
-  const msg = document.getElementById('cal-status-text');
-
-  if (calStep === 0) {
-    calCentre = { fx, fy, cssX, cssY };
-    calStep   = 1;
-    if (msg) msg.textContent = '2/2 : Cliquez sur le bord extérieur (double ring)…';
-    clearOverlay();
-    drawCrossHair(cssX, cssY);
-  } else {
-    const saved = { ...calCentre };   // copy before cancelCal clears it
-    const rFr   = Math.hypot(fx - saved.fx, fy - saved.fy);
-    cancelCal();  // clears overlay and resets state
-    const r = await apiFetch('/api/camera/calibrate_manual', 'POST', {
-      center_x: saved.fx,
-      center_y: saved.fy,
-      radius:   rFr,
-    });
-    if (r.error) {
-      if (msg) msg.textContent = '⚠ ' + r.error;
-      showToast(r.error, 'bust');
-    } else {
-      const label = r.ellipse_fitted
-        ? `Ellipse ajustée ✓  r=${r.radius}px`
-        : `Calibré ✓  r=${r.radius}px`;
-      if (msg) msg.textContent = label;
-      showToast(label, 'info');
-    }
-  }
-});
 
 // ============================================================
 //   CAMERA CONTROLS
@@ -809,19 +681,21 @@ document.getElementById('btn-set-bg').addEventListener('click', async () => {
   showToast(r.error ? r.error : 'Fond défini ✓', r.error ? 'bust' : 'info');
 });
 
-// Calibrer = start 2-click manual calibration mode
-document.getElementById('btn-calibrate').addEventListener('click', () => {
-  initOverlay();
-  calMode  = true;
-  calStep  = 0;
-  calCentre = null;
-  clearOverlay();
-  camWrap.style.cursor = 'crosshair';
+// Calibrer = lancer la calibration automatique (couleurs rouge/vert)
+document.getElementById('btn-calibrate').addEventListener('click', async () => {
   const msg = document.getElementById('cal-status-text');
-  if (msg) msg.textContent = '1/2 : Cliquez sur le centre (bull)…';
+  if (msg) msg.textContent = 'Calibration en cours…';
   // Switch to camera tab if not already visible
   const camTab = document.querySelector('.tab[data-tab="camera"]');
   if (camTab && !camTab.classList.contains('active')) camTab.click();
+  const r = await apiFetch('/api/camera/calibrate', 'POST');
+  if (r.error) {
+    if (msg) msg.textContent = '⚠ ' + r.error;
+    showToast(r.error, 'bust');
+  } else {
+    if (msg) msg.textContent = `Cible calibrée ✓  r=${r.radius}px`;
+    showToast(`Calibration ✓  r=${r.radius}px`, 'info');
+  }
 });
 
 document.getElementById('btn-detect').addEventListener('click', async () => {
@@ -834,7 +708,7 @@ document.getElementById('btn-auto-detect').addEventListener('click', async () =>
   if (r.error) showToast(r.error, 'bust');
 });
 
-window.addEventListener('resize', () => { if (calMode) initOverlay(); });
+
 
 
 // ============================================================
