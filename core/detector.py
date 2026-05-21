@@ -237,8 +237,8 @@ class DartDetector:
         # ── Helper: fit ellipse on the board rim edge pixels ──────────────────
         def fit_rim_ellipse(cx_, cy_, r_):
             ann = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 1.15), 255, -1)
-            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 0.85), 0, -1)
+            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 1.30), 255, -1)
+            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 0.75), 0, -1)
             rim = cv2.bitwise_and(edges, edges, mask=ann)
             pts_list, _ = cv2.findContours(rim, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
             valid = [c for c in pts_list if len(c) >= 5]
@@ -348,10 +348,11 @@ class DartDetector:
             best_ell = refined
 
         (ex, ey), (ma, mi), _ = best_ell
-        aspect = ma / mi if mi > 0 else 1.0
         self.board_center  = (int(ex), int(ey))
         self.board_radius  = int((ma + mi) / 4.0)
-        self.board_ellipse = best_ell if aspect >= 1.05 else None
+        # Always store the fitted ellipse — even nearly circular ones are more
+        # accurate than a perfect circle and correct for camera angle.
+        self.board_ellipse = best_ell
         return {
             "status": "ok",
             "center": list(self.board_center),
