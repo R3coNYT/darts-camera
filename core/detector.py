@@ -289,65 +289,116 @@ class DartDetector:
 
     def _fit_board_from_intersections(self, frame):
         """
-        Détecte les intersections des barres métalliques de la cible via
-        Shi-Tomasi corner detection, filtre les coins par densité pour isoler
-        la zone de la cible, puis ajuste une ellipse sur les points les plus
-        externes (bord du double ring).
-        Tous les points gardés sont sauvegardés dans _cal_debug_pts.
+        Détecte les intersections RÉELLES des barres métalliques :
+        HoughLinesP trouve les segments de fil, puis on calcule uniquement
+        les croisements où deux segments se coupent physiquement (vérification
+        que le point est dans la boîte englobante des deux segments).
+        Le grain du bois est quasi-parallèle → peu/pas d'intersections parasites.
         """
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
+        min_dim = min(h, w)
 
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
+        blurred = cv2.GaussianBlur(enhanced, (3, 3), 0)
+        edges = cv2.Canny(blurred, 30, 90)
 
-        # Shi-Tomasi : les intersections de barres créent des coins très forts
-        corners = cv2.goodFeaturesToTrack(
-            enhanced,
-            maxCorners=700,
-            qualityLevel=0.003,
-            minDistance=6,
-            blockSize=5,
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=15,
+            minLineLength=15,
+            maxLineGap=6,
         )
 
-        if corners is None or len(corners) < 40:
+        if lines is None or len(lines) < 10:
             self._cal_debug_pts = None
             return None
 
-        pts = corners.reshape(-1, 2).astype(np.float32)
+        # Garder les 400 segments les plus longs (limite la complexité O(N²))
+        raw = []
+        for l in lines[:, 0]:
+            x1, y1, x2, y2 = float(l[0]), float(l[1]), float(l[2]), float(l[3])
+            raw.append((math.hypot(x2 - x1, y2 - y1), x1, y1, x2, y2))
+        raw.sort(reverse=True)
+        raw = raw[:400]
 
-        # Filtrage par densité : la cible est bien plus dense en coins que l'arrière-plan.
-        NEIGH_R   = 35.0
-        MIN_NEIGH = 5
-        diff         = pts[:, np.newaxis, :] - pts[np.newaxis, :, :]  # (N, N, 2)
-        dist_mat     = np.sqrt((diff ** 2).sum(axis=2))                # (N, N)
-        neigh_count  = (dist_mat < NEIGH_R).sum(axis=1) - 1           # exclure soi-même
-        dense        = pts[neigh_count >= MIN_NEIGH]
+        segs = []
+        for (_, x1, y1, x2, y2) in raw:
+            dx, dy = x2 - x1, y2 - y1
+            angle = math.atan2(dy, dx) % math.pi
+            A, B = dy, -dx
+            n = math.hypot(A, B)
+            if n == 0:
+                continue
+            A /= n; B /= n
+            C = -(A * x1 + B * y1)   # équation : A*x + B*y + C = 0
+            segs.append({
+                'angle': angle, 'A': A, 'B': B, 'C': C,
+                'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2,
+            })
 
-        if len(dense) < 25:
-            self._cal_debug_pts = pts   # afficher tout pour diagnostic
+        TOL = 14.0  # tolérance pixels au-delà des extrémités
+
+        def on_seg(px, py, s):
+            return (min(s['x1'], s['x2']) - TOL <= px <= max(s['x1'], s['x2']) + TOL
+                    and min(s['y1'], s['y2']) - TOL <= py <= max(s['y1'], s['y2']) + TOL)
+
+        intersections = []
+        for i in range(len(segs)):
+            for j in range(i + 1, len(segs)):
+                s1, s2 = segs[i], segs[j]
+                diff = abs(s1['angle'] - s2['angle'])
+                diff = min(diff, math.pi - diff)
+                if diff < math.radians(20):   # ignorer segments quasi-parallèles
+                    continue
+                det = s1['A'] * s2['B'] - s2['A'] * s1['B']
+                if abs(det) < 1e-6:
+                    continue
+                # Intersection de deux droites (forme A*x + B*y + C = 0)
+                px = (s1['B'] * s2['C'] - s2['B'] * s1['C']) / det
+                py = (s1['C'] * s2['A'] - s2['C'] * s1['A']) / det
+                if not (0 <= px < w and 0 <= py < h):
+                    continue
+                # On ne garde que les vrais croisements (pas les prolongements)
+                if on_seg(px, py, s1) and on_seg(px, py, s2):
+                    intersections.append((px, py))
+
+        if len(intersections) < 15:
+            self._cal_debug_pts = None
             return None
 
-        self._cal_debug_pts = dense
+        pts = np.array(intersections, dtype=np.float32)
+        self._cal_debug_pts = pts
 
-        # Centre robuste via médiane (résiste aux outliers)
-        cx0 = float(np.median(dense[:, 0]))
-        cy0 = float(np.median(dense[:, 1]))
-        dx  = dense[:, 0] - cx0
-        dy  = dense[:, 1] - cy0
-        dist    = np.sqrt(dx * dx + dy * dy)
-        angles  = (np.degrees(np.arctan2(dy, dx)) + 360.0) % 360.0
+        # Centre via densité (bin 2 % de min_dim)
+        bin_size = max(12, int(min_dim * 0.02))
+        bins_arr = np.floor(pts / bin_size).astype(np.int32)
+        unique_b, counts = np.unique(bins_arr, axis=0, return_counts=True)
+        best = unique_b[np.argmax(counts)]
+        cguess = (best.astype(np.float32) + 0.5) * bin_size
+        d_guess = np.linalg.norm(pts - cguess, axis=1)
+        cluster = pts[d_guess < bin_size * 5]
+        if len(cluster) < 8:
+            return None
+        cx0 = float(np.median(cluster[:, 0]))
+        cy0 = float(np.median(cluster[:, 1]))
 
-        # Pour chaque tranche de 9°, garder le point le plus éloigné du centre
-        # → ces points tracent le bord extérieur du double ring
+        dx_arr = pts[:, 0] - cx0
+        dy_arr = pts[:, 1] - cy0
+        dist_arr = np.sqrt(dx_arr ** 2 + dy_arr ** 2)
+        ang_arr  = (np.degrees(np.arctan2(dy_arr, dx_arr)) + 360.0) % 360.0
+
+        # Bord externe : point le plus éloigné par tranche de 9°
         outer_pts = []
         for b in range(40):
             a_min = b * 9.0
-            a_max = a_min + 9.0
-            idx = np.where((angles >= a_min) & (angles < a_max))[0]
+            idx = np.where((ang_arr >= a_min) & (ang_arr < a_min + 9.0))[0]
             if len(idx) == 0:
                 continue
-            outer_pts.append(dense[idx[np.argmax(dist[idx])]])
+            outer_pts.append(pts[idx[np.argmax(dist_arr[idx])]])
 
         if len(outer_pts) < 12:
             return None
@@ -362,10 +413,10 @@ class DartDetector:
         sm = min(axis_a, axis_b)
         bg = max(axis_a, axis_b)
 
-        if sm < min(h, w) * 0.20:              return None
-        if bg > min(h, w) * 1.10:              return None
-        if bg / sm > 2.5:                       return None
-        if not (0 <= ex < w and 0 <= ey < h):   return None
+        if sm < min_dim * 0.20:               return None
+        if bg > min_dim * 1.10:               return None
+        if bg / sm > 2.5:                      return None
+        if not (0 <= ex < w and 0 <= ey < h):  return None
 
         return ell
 
