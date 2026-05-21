@@ -64,6 +64,9 @@ class DartDetector:
         # OpenCV ellipse format: ((cx, cy), (MA, ma), angle_deg)
         # MA and ma are the FULL axis lengths (semi = /2).
         self.board_ellipse: Optional[tuple] = None
+        
+        self.board_homography = None
+        self.board_homography_inv = None
 
         # Last detected dart positions (for overlay)
         self._dart_positions: List[Tuple[float, float]] = []
@@ -126,17 +129,34 @@ class DartDetector:
 
             # Draw a ring at `frac` of the board radius (circle or ellipse).
             def draw_ring(frac: float, color: tuple, thickness: int = 1) -> None:
-                if self.board_ellipse is not None:
+                if self.board_homography is not None:
+                    self._draw_projected_ring(frame, frac, color, thickness)
+
+                elif self.board_ellipse is not None:
                     (ecx, ecy), (ma, mi), ang = self.board_ellipse
                     axes = (
                         max(1, int(ma / 2 * frac)),
                         max(1, int(mi / 2 * frac)),
                     )
-                    cv2.ellipse(frame, (int(ecx), int(ecy)), axes,
-                                ang, 0, 360, color, thickness)
+                    cv2.ellipse(
+                        frame,
+                        (int(ecx), int(ecy)),
+                        axes,
+                        ang,
+                        0,
+                        360,
+                        color,
+                        thickness,
+                    )
+
                 else:
-                    cv2.circle(frame, (cx, cy), max(1, int(r * frac)),
-                               color, thickness)
+                    cv2.circle(
+                        frame,
+                        (cx, cy),
+                        max(1, int(r * frac)),
+                        color,
+                        thickness,
+                    )
 
             # Double ring  (rouge) — bords intérieur et extérieur
             draw_ring(1.000, (0, 0, 220), 2)   # outer double
@@ -147,8 +167,12 @@ class DartDetector:
             # Outer bull   (jaune)
             draw_ring(0.094, (0, 200, 255), 2)
             # Bull (centre bleu)
-            cv2.circle(frame, (cx, cy), max(1, int(r * 0.037)), (255, 160, 0), -1)
-            cv2.circle(frame, (cx, cy), 7, (255, 255, 255), 1)
+            if self.board_homography is not None:
+                self._draw_projected_disk(frame, 0.037, (255, 160, 0))
+                cv2.circle(frame, (cx, cy), 7, (255, 255, 255), 1)
+            else:
+                cv2.circle(frame, (cx, cy), max(1, int(r * 0.037)), (255, 160, 0), -1)
+                cv2.circle(frame, (cx, cy), 7, (255, 255, 255), 1)
             # Positions des fléchettes détectées
             for (dx, dy) in self._dart_positions:
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 60, 0), -1)
@@ -656,6 +680,99 @@ class DartDetector:
 
         return ell
 
+    def calibrate_perspective_manual(
+        self,
+        center: Tuple[float, float],
+        top: Tuple[float, float],
+        right: Tuple[float, float],
+        bottom: Tuple[float, float],
+        left: Tuple[float, float],
+    ) -> bool:
+        """
+        Calibration perspective avec 5 points :
+        - center = centre de la bulle
+        - top/right/bottom/left = bord extérieur du double
+        """
+        src = np.array([
+            [0.0, 0.0],    # centre
+            [0.0, -1.0],   # haut
+            [1.0, 0.0],    # droite
+            [0.0, 1.0],    # bas
+            [-1.0, 0.0],   # gauche
+        ], dtype=np.float32)
+
+        dst = np.array([
+            center,
+            top,
+            right,
+            bottom,
+            left,
+        ], dtype=np.float32)
+
+        H, _ = cv2.findHomography(src, dst, method=0)
+
+        if H is None:
+            return False
+
+        self.board_homography = H
+        self.board_homography_inv = np.linalg.inv(H)
+
+        self.board_center = (int(center[0]), int(center[1]))
+
+        distances = [
+            math.hypot(top[0] - center[0], top[1] - center[1]),
+            math.hypot(right[0] - center[0], right[1] - center[1]),
+            math.hypot(bottom[0] - center[0], bottom[1] - center[1]),
+            math.hypot(left[0] - center[0], left[1] - center[1]),
+        ]
+
+        self.board_radius = int(sum(distances) / len(distances))
+
+        self.board_ellipse = None
+
+        return True
+
+
+    def _project_board_points(self, points):
+        """
+        Convertit des points normalisés de la cible vers l'image caméra.
+        """
+        pts = np.array(points, dtype=np.float32).reshape(-1, 1, 2)
+        projected = cv2.perspectiveTransform(pts, self.board_homography)
+        return projected.reshape(-1, 2).astype(np.int32)
+
+
+    def _draw_projected_ring(self, frame, frac: float, color: tuple, thickness: int = 1):
+        """
+        Dessine un anneau corrigé par homographie.
+        """
+        points = []
+
+        for i in range(240):
+            a = 2.0 * math.pi * i / 240
+            x = math.cos(a) * frac
+            y = math.sin(a) * frac
+            points.append((x, y))
+
+        projected = self._project_board_points(points)
+        cv2.polylines(frame, [projected], True, color, thickness)
+
+
+    def _draw_projected_disk(self, frame, frac: float, color: tuple):
+        """
+        Dessine un disque rempli corrigé par homographie.
+        """
+        points = []
+
+        for i in range(120):
+            a = 2.0 * math.pi * i / 120
+            x = math.cos(a) * frac
+            y = math.sin(a) * frac
+            points.append((x, y))
+
+        projected = self._project_board_points(points)
+        cv2.fillPoly(frame, [projected], color)
+
     def _to_board_norm(self, px: float, py: float) -> Tuple[float, float]:
         """
         Transform a pixel position to normalised board coordinates
@@ -664,6 +781,12 @@ class DartDetector:
         If an ellipse was fitted, applies the inverse ellipse transform to
         correct perspective distortion before scoring.
         """
+
+        if self.board_homography_inv is not None:
+            pt = np.array([[[px, py]]], dtype=np.float32)
+            norm = cv2.perspectiveTransform(pt, self.board_homography_inv)[0][0]
+            return float(norm[0]), float(norm[1])
+        
         if self.board_ellipse is not None:
             (cx, cy), (ma, mi), angle_deg = self.board_ellipse
             a = ma / 2.0          # semi-major axis
