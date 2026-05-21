@@ -70,6 +70,8 @@ class DartDetector:
 
         # Last detected dart positions (for overlay)
         self._dart_positions: List[Tuple[float, float]] = []
+        # Calibration debug: outer edge points used to fit the ellipse
+        self._cal_debug_pts: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -177,6 +179,11 @@ class DartDetector:
             for (dx, dy) in self._dart_positions:
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 60, 0), -1)
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 255, 255), 2)
+
+            # Points de calibration debug (bord extérieur rouge/vert détectés)
+            if self._cal_debug_pts is not None:
+                for pt in self._cal_debug_pts:
+                    cv2.circle(frame, (int(pt[0]), int(pt[1])), 3, (0, 255, 255), -1)
 
         return frame
 
@@ -646,6 +653,7 @@ class DartDetector:
             outer_pts.extend(pts[best])
 
         outer_pts = np.array(outer_pts, dtype=np.float32)
+        self._cal_debug_pts = outer_pts  # save for overlay display
 
         if len(outer_pts) < 40:
             return None
