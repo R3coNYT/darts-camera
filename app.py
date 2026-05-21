@@ -162,8 +162,13 @@ def calibrate_manual():
         r  = float(data["radius"])
     except (KeyError, TypeError, ValueError):
         return jsonify({"error": "Paramètres invalides (center_x, center_y, radius)."}), 400
-    detector.calibrate_manual(cx, cy, r)
-    return jsonify({"status": "ok", "center": [int(cx), int(cy)], "radius": int(r)})
+    ellipse_fitted = detector.calibrate_manual(cx, cy, r)
+    return jsonify({
+        "status":         "ok",
+        "center":         list(detector.board_center),
+        "radius":         detector.board_radius,
+        "ellipse_fitted": ellipse_fitted,
+    })
 
 
 @app.route("/api/camera/background", methods=["POST"])

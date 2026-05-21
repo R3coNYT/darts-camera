@@ -325,11 +325,71 @@ class DartDetector:
             "radius": self.board_radius,
         }
 
-    def calibrate_manual(self, cx: float, cy: float, radius: float) -> None:
-        """Set board region from user-provided coordinates (always circle mode)."""
+    def calibrate_manual(self, cx: float, cy: float, radius: float) -> bool:
+        """
+        Set board region from user-provided centre + radius.
+        Automatically upgrades to an ellipse by fitting to the actual rim
+        edges at the specified location (corrects camera tilt/perspective).
+        Returns True if an ellipse was fitted, False if a plain circle is kept.
+        """
         self.board_center  = (int(cx), int(cy))
         self.board_radius  = int(radius)
         self.board_ellipse = None
+
+        ell = self._fit_ellipse_at(cx, cy, radius)
+        if ell is not None:
+            self.board_ellipse = ell
+            (ex, ey), (ma, mi), _ = ell
+            self.board_center = (int(ex), int(ey))
+            self.board_radius = int((ma + mi) / 4.0)
+            return True
+        return False
+
+    def _fit_ellipse_at(self, cx: float, cy: float, r: float):
+        """
+        Fit an ellipse to the board rim by collecting Canny edge pixels in a
+        wide annulus (80 %–120 % of r) centred at (cx, cy).
+        Returns an OpenCV ellipse tuple, or None if the fit is poor.
+        """
+        with self._lock:
+            if self._current_frame is None:
+                return None
+            frame = self._current_frame.copy()
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h, w = gray.shape
+
+        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+        blurred  = cv2.GaussianBlur(enhanced, (9, 9), 2)
+        edges    = cv2.Canny(blurred, 30, 100)
+
+        inner = max(1, int(r * 0.82))
+        outer = min(int(r * 1.18), min(h, w))
+        ann   = np.zeros((h, w), dtype=np.uint8)
+        cv2.circle(ann, (int(cx), int(cy)), outer, 255, -1)
+        cv2.circle(ann, (int(cx), int(cy)), inner, 0, -1)
+
+        rim     = cv2.bitwise_and(edges, edges, mask=ann)
+        cnts, _ = cv2.findContours(rim, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        valid   = [c for c in cnts if len(c) >= 5]
+        if not valid:
+            return None
+        all_pts = np.vstack(valid)
+        if len(all_pts) < 50:
+            return None
+        try:
+            ell = cv2.fitEllipse(all_pts)
+        except cv2.error:
+            return None
+
+        (ex, ey), (ma, mi), _ = ell
+        if mi < 1 or ma / mi > 2.2:
+            return None
+        # Reject if the fitted centre drifted too far from the user's click
+        if math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2) > r * 0.25:
+            return None
+        return ell
 
     def _to_board_norm(self, px: float, py: float) -> Tuple[float, float]:
         """

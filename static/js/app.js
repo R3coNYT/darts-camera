@@ -785,8 +785,16 @@ camWrap?.addEventListener('click', async e => {
       center_y: saved.fy,
       radius:   rFr,
     });
-    if (msg) msg.textContent = r.error ? '⚠ ' + r.error : `Calibré ✓  r=${Math.round(rFr)}px`;
-    showToast(r.error ? r.error : `Calibré ✓  r=${Math.round(rFr)}px`, r.error ? 'bust' : 'info');
+    if (r.error) {
+      if (msg) msg.textContent = '⚠ ' + r.error;
+      showToast(r.error, 'bust');
+    } else {
+      const label = r.ellipse_fitted
+        ? `Ellipse ajustée ✓  r=${r.radius}px`
+        : `Calibré ✓  r=${r.radius}px`;
+      if (msg) msg.textContent = label;
+      showToast(label, 'info');
+    }
   }
 });
 
