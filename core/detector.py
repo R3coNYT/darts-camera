@@ -14,6 +14,7 @@ Calibration:
   - Manual:    User supplies centre (x, y) + radius in pixels (or via a
                browser click that POSTs to /api/camera/calibrate).
 """
+import math
 import threading
 import time
 from typing import List, Optional, Tuple
@@ -118,11 +119,14 @@ class DartDetector:
         if annotated and self.board_center and self.board_radius:
             cx, cy = self.board_center
             r = self.board_radius
-            # Board boundary
-            cv2.circle(frame, (cx, cy), r, (0, 255, 80), 2)
-            # Centre dot
-            cv2.circle(frame, (cx, cy), 5, (0, 80, 255), -1)
-            # Dart positions
+            # Cercle vert — juste avant les chiffres (bord anneau double ≈ 87 % du rayon total)
+            cv2.circle(frame, (cx, cy), int(r * 0.87), (0, 255, 0), 2)
+            # Cercle rouge — bord extérieur de la cible, après les chiffres
+            cv2.circle(frame, (cx, cy), r, (0, 0, 255), 2)
+            # Point central bleu
+            cv2.circle(frame, (cx, cy), 7, (255, 80, 0), -1)
+            cv2.circle(frame, (cx, cy), 7, (255, 255, 255), 1)
+            # Positions des fléchettes détectées
             for (dx, dy) in self._dart_positions:
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 60, 0), -1)
                 cv2.circle(frame, (int(dx), int(dy)), 9, (255, 255, 255), 2)
@@ -151,7 +155,9 @@ class DartDetector:
 
     def calibrate_auto(self) -> dict:
         """
-        Try to auto-detect the dartboard circle using Hough transforms.
+        Auto-detect the dartboard using Hough circle transforms with
+        progressively lenient thresholds, then an ellipse-fitting fallback
+        for cameras that are not perfectly perpendicular to the board.
         Returns a dict with 'status', 'center', 'radius' or 'error'.
         """
         with self._lock:
@@ -159,39 +165,90 @@ class DartDetector:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (9, 9), 2)
-        h, w = gray.shape
-        min_r = min(h, w) // 6
-        max_r = min(h, w) // 2
+        gray    = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+        h, w    = gray.shape
+        min_r   = min(h, w) // 6
+        max_r   = min(h, w) // 2
 
-        circles = cv2.HoughCircles(
-            gray,
-            cv2.HOUGH_GRADIENT,
-            dp=1,
-            minDist=min(h, w) // 2,
-            param1=100,
-            param2=45,
-            minRadius=min_r,
-            maxRadius=max_r,
+        # ── 1. Hough circles — essai avec plusieurs seuils (du plus strict au plus laxiste)
+        for param2 in (50, 38, 28):
+            circles = cv2.HoughCircles(
+                blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=min(h, w) // 2,
+                param1=100,
+                param2=param2,
+                minRadius=min_r,
+                maxRadius=max_r,
+            )
+            if circles is not None:
+                circles = np.uint16(np.around(circles))
+                best = max(circles[0], key=lambda c: c[2])
+                self.board_center = (int(best[0]), int(best[1]))
+                self.board_radius = int(best[2])
+                return {
+                    "status": "ok",
+                    "center": list(self.board_center),
+                    "radius": self.board_radius,
+                }
+
+        # ── 2. Fallback : détection d'ellipse pour caméra non perpendiculaire ────
+        # La cible peut apparaître elliptique si la caméra est de biais.
+        # On cherche le plus grand contour fermé approchant une ellipse.
+        edges = cv2.Canny(blurred, 40, 120)
+        dil_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        edges = cv2.dilate(edges, dil_k, iterations=2)
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
         )
 
-        if circles is None:
+        best_ellipse = None
+        best_r       = 0
+        min_area     = math.pi * min_r * min_r * 0.4
+
+        for cnt in contours:
+            if len(cnt) < 50:
+                continue
+            if cv2.contourArea(cnt) < min_area:
+                continue
+            try:
+                ellipse = cv2.fitEllipse(cnt)
+            except cv2.error:
+                continue
+
+            (ex, ey), (axis_a, axis_b), _angle = ellipse
+            if axis_b < 1:
+                continue
+            aspect = axis_a / axis_b          # >= 1 (major/minor)
+            if aspect > 2.2:                  # trop déformé, pas une cible
+                continue
+
+            r_avg = (axis_a + axis_b) / 4.0   # demi-axe moyen
+            if not (min_r <= r_avg <= max_r):
+                continue
+
+            # Préférer l'ellipse la plus grande qui reste dans le cadre
+            if r_avg > best_r:
+                best_r       = r_avg
+                best_ellipse = ellipse
+
+        if best_ellipse is not None:
+            (ex, ey), (axis_a, axis_b), _ = best_ellipse
+            self.board_center = (int(ex), int(ey))
+            self.board_radius = int((axis_a + axis_b) / 4.0)
             return {
-                "error": (
-                    "Aucun cercle détecté. Essayez d'améliorer l'éclairage "
-                    "ou utilisez la calibration manuelle."
-                )
+                "status": "ok",
+                "center": list(self.board_center),
+                "radius": self.board_radius,
             }
 
-        circles = np.uint16(np.around(circles))
-        best = max(circles[0], key=lambda c: c[2])
-        self.board_center = (int(best[0]), int(best[1]))
-        self.board_radius = int(best[2])
         return {
-            "status": "ok",
-            "center": list(self.board_center),
-            "radius": self.board_radius,
+            "error": (
+                "Aucun cercle détecté. Essayez d'améliorer l'éclairage "
+                "ou utilisez la calibration manuelle."
+            )
         }
 
     def calibrate_manual(self, cx: float, cy: float, radius: float) -> None:
