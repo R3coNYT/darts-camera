@@ -122,25 +122,32 @@ class DartDetector:
 
         if annotated and self.board_center and self.board_radius:
             cx, cy = self.board_center
+            r      = self.board_radius
 
-            if self.board_ellipse is not None:
-                (ecx, ecy), (ma, mi), angle = self.board_ellipse
-                center = (int(ecx), int(ecy))
-                sa, sb = int(ma / 2), int(mi / 2)   # semi-axes
-                # Ellipse verte — avant les chiffres (≈ 87 % des axes)
-                cv2.ellipse(frame, center, (int(sa * 0.87), int(sb * 0.87)),
-                            angle, 0, 360, (0, 255, 0), 2)
-                # Ellipse rouge — bord extérieur (après les chiffres)
-                cv2.ellipse(frame, center, (sa, sb), angle, 0, 360, (0, 0, 255), 2)
-            else:
-                r = self.board_radius
-                # Cercle vert — avant les chiffres
-                cv2.circle(frame, (cx, cy), int(r * 0.87), (0, 255, 0), 2)
-                # Cercle rouge — bord extérieur
-                cv2.circle(frame, (cx, cy), r, (0, 0, 255), 2)
+            # Draw a ring at `frac` of the board radius (circle or ellipse).
+            def draw_ring(frac: float, color: tuple, thickness: int = 1) -> None:
+                if self.board_ellipse is not None:
+                    (ecx, ecy), (ma, mi), ang = self.board_ellipse
+                    axes = (
+                        max(1, int(ma / 2 * frac)),
+                        max(1, int(mi / 2 * frac)),
+                    )
+                    cv2.ellipse(frame, (int(ecx), int(ecy)), axes,
+                                ang, 0, 360, color, thickness)
+                else:
+                    cv2.circle(frame, (cx, cy), max(1, int(r * frac)),
+                               color, thickness)
 
-            # Point central bleu (commun aux deux modes)
-            cv2.circle(frame, (cx, cy), 7, (255, 80, 0), -1)
+            # Double ring  (rouge) — bords intérieur et extérieur
+            draw_ring(1.000, (0, 0, 220), 2)   # outer double
+            draw_ring(0.953, (0, 0, 220), 1)   # inner double
+            # Triple ring  (vert)
+            draw_ring(0.629, (0, 220, 0), 2)   # outer triple
+            draw_ring(0.582, (0, 220, 0), 1)   # inner triple
+            # Outer bull   (jaune)
+            draw_ring(0.094, (0, 200, 255), 2)
+            # Bull (centre bleu)
+            cv2.circle(frame, (cx, cy), max(1, int(r * 0.037)), (255, 160, 0), -1)
             cv2.circle(frame, (cx, cy), 7, (255, 255, 255), 1)
             # Positions des fléchettes détectées
             for (dx, dy) in self._dart_positions:
@@ -192,6 +199,12 @@ class DartDetector:
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
+
+        # The board is always roughly centred in the frame.
+        # Any candidate whose centre is farther than this from the image
+        # centre is rejected as a false positive.
+        img_cx, img_cy = w // 2, h // 2
+        max_center_dist = min(h, w) * 0.40
 
         clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
@@ -272,6 +285,9 @@ class DartDetector:
             r_avg = (ma + mi) / 4.0
             if not (min_r <= r_avg <= max_r):
                 continue
+            # Board centre must be near the image centre
+            if math.sqrt((ex - img_cx) ** 2 + (ey - img_cy) ** 2) > max_center_dist:
+                continue
             s = ring_score(ex, ey, r_avg)
             if s > best_rs:
                 best_rs  = s
@@ -290,10 +306,14 @@ class DartDetector:
                 )
                 if circles is not None:
                     for c in circles[0]:
-                        s = ring_score(int(c[0]), int(c[1]), int(c[2]))
+                        ccx, ccy, cr = int(c[0]), int(c[1]), int(c[2])
+                        # Reject candidates too far from image centre
+                        if math.sqrt((ccx - img_cx) ** 2 + (ccy - img_cy) ** 2) > max_center_dist:
+                            continue
+                        s = ring_score(ccx, ccy, cr)
                         if s > hough_best_rs:
                             hough_best_rs = s
-                            hough_cx, hough_cy, hough_r = int(c[0]), int(c[1]), int(c[2])
+                            hough_cx, hough_cy, hough_r = ccx, ccy, cr
                     break   # stop at first param2 that detects anything
 
             if hough_cx is not None:
