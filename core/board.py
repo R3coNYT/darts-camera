@@ -75,6 +75,34 @@ def pixel_to_score(
     return 0, "MISS", 0
 
 
+def score_from_norm(x_n: float, y_n: float) -> Tuple[int, str, int]:
+    """
+    Score from already-normalised board coordinates.
+
+    x_n, y_n are in board space (radius 1.0 = outer double ring edge).
+    Use this with ellipse-corrected coordinates for perspective-aware scoring.
+    """
+    r_norm = math.sqrt(x_n * x_n + y_n * y_n)
+
+    if r_norm <= BULL_INNER_R:
+        return 50, "BULL", 1
+    if r_norm <= BULL_OUTER_R:
+        return 25, "OUTER_BULL", 1
+
+    angle = math.degrees(math.atan2(x_n, -y_n)) % 360
+    segment = angle_to_segment(angle)
+
+    if r_norm <= TRIPLE_INNER_R:
+        return segment, "SINGLE", 1
+    if r_norm <= TRIPLE_OUTER_R:
+        return segment * 3, "TRIPLE", 3
+    if r_norm <= DOUBLE_INNER_R:
+        return segment, "SINGLE", 1
+    if r_norm <= DOUBLE_OUTER_R:
+        return segment * 2, "DOUBLE", 2
+    return 0, "MISS", 0
+
+
 def score_to_label(score: int, zone: str, multiplier: int) -> str:
     """Return a human-readable dart label: 'T20', 'D16', 'S5', 'B', 'DB', 'MISS'."""
     if zone == "BULL":
