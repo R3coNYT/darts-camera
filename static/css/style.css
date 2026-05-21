@@ -443,11 +443,16 @@ button:active { transform: scale(.97); }
   position: relative;
   background: #000;
   min-height: 0;
+  /* Clicks on the wrapper itself are used for 2-click calibration */
+  cursor: default;
+  user-select: none;
 }
 .camera-img {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
+  /* Let clicks bubble up to the wrapper */
+  pointer-events: none;
 }
 .no-camera {
   text-align: center;
