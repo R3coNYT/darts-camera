@@ -171,11 +171,19 @@ class DartDetector:
 
     def calibrate_auto(self) -> dict:
         """
-        Auto-detect the dartboard using Hough circle transforms then an
-        ellipse-fitting fallback.  Candidates are ranked by their internal
-        edge density: the dartboard has far more internal structure (segment
-        wires, rings) than any other region, so the highest-density candidate
-        is almost always the board regardless of its position in the frame.
+        Detect the dartboard and store its ellipse for perspective-aware scoring.
+
+        Strategy
+        --------
+        Both approaches score candidates with a **ring-structure metric**:
+        a real dartboard has strong edges at specific fractional radii
+        (bull ≈9 %, triple ≈57-63 %, double ≈95-100 %).
+        The geometric mean of those ring densities is very high for a
+        dartboard and near-zero for random textured backgrounds.
+
+        1. Contour → convex-hull → fitEllipse (perspective-aware, primary).
+        2. Hough circles scored by ring-structure (fallback if 1 fails).
+        3. After locating the board, fit a refined ellipse on the rim edges.
         """
         with self._lock:
             if self._current_frame is None:
@@ -185,103 +193,149 @@ class DartDetector:
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
 
-        # CLAHE : améliore le contraste local (utile en conditions d'éclairage inégal)
-        clahe   = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         enhanced = clahe.apply(gray)
         blurred  = cv2.GaussianBlur(enhanced, (9, 9), 2)
+        edges    = cv2.Canny(blurred, 40, 120)
 
-        # Carte de contours utilisée pour scorer les candidats
-        edges = cv2.Canny(blurred, 40, 120)
+        min_r = min(h, w) // 6
+        max_r = int(min(h, w) * 0.72)
 
-        min_r = min(h, w) // 8
-        max_r = min(h, w) // 2
+        # ── Ring-structure scorer ──────────────────────────────────────────────
+        # Measures edge density in thin annuli at the known ring positions of a
+        # standard dartboard (fractions of outer double-ring radius).
+        # Geometric mean → a single missing ring drives the score to 0.
+        _FRACS = (0.09, 0.57, 0.63, 0.95, 1.00)
+        _HW    = 0.05   # annulus half-width as fraction of r
 
-        def edge_density(cx_, cy_, r_):
-            """Fraction de pixels de contour à l'intérieur du cercle candidat."""
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(mask, (int(cx_), int(cy_)), int(r_), 255, -1)
-            inside = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=mask))
-            area   = math.pi * r_ * r_
-            return inside / area if area > 0 else 0.0
+        def ring_score(cx_, cy_, r_):
+            log_sum = 0.0
+            for f in _FRACS:
+                rr  = max(3, int(r_ * f))
+                dr  = max(2, int(r_ * _HW))
+                ann = np.zeros((h, w), dtype=np.uint8)
+                cv2.circle(ann, (int(cx_), int(cy_)), rr + dr, 255, -1)
+                cv2.circle(ann, (int(cx_), int(cy_)), max(0, rr - dr), 0, -1)
+                n    = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=ann))
+                area = cv2.countNonZero(ann)
+                log_sum += math.log(n / area if area > 0 else 1e-9)
+            return log_sum / len(_FRACS)   # log geometric mean (monotone ↔ OK to compare)
 
-        # ── 1. Hough circles — plusieurs seuils, on garde le + dense ─────────
-        for param2 in (50, 38, 28):
-            circles = cv2.HoughCircles(
-                blurred,
-                cv2.HOUGH_GRADIENT,
-                dp=1,
-                minDist=min(h, w) // 3,   # autoriser plusieurs candidats
-                param1=80,
-                param2=param2,
-                minRadius=min_r,
-                maxRadius=max_r,
-            )
-            if circles is not None:
-                circles = np.uint16(np.around(circles))
-                best = max(
-                    circles[0],
-                    key=lambda c: edge_density(c[0], c[1], c[2]),
-                )
-                self.board_center = (int(best[0]), int(best[1]))
-                self.board_radius = int(best[2])
-                return {
-                    "status": "ok",
-                    "center": list(self.board_center),
-                    "radius": self.board_radius,
-                }
+        # ── Helper: fit ellipse on the board rim edge pixels ──────────────────
+        def fit_rim_ellipse(cx_, cy_, r_):
+            ann = np.zeros((h, w), dtype=np.uint8)
+            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 1.15), 255, -1)
+            cv2.circle(ann, (int(cx_), int(cy_)), int(r_ * 0.85), 0, -1)
+            rim = cv2.bitwise_and(edges, edges, mask=ann)
+            pts_list, _ = cv2.findContours(rim, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+            valid = [c for c in pts_list if len(c) >= 5]
+            if not valid:
+                return None
+            all_pts = np.vstack(valid)
+            if len(all_pts) < 50:
+                return None
+            try:
+                ell = cv2.fitEllipse(all_pts)
+            except cv2.error:
+                return None
+            (_, _), (ma, mi), _ = ell
+            if mi < 1 or ma / mi > 2.5:
+                return None
+            return ell
 
-        # ── 2. Fallback ellipse (caméra de biais) ─────────────────────────────
-        dil_k     = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        edges_dil = cv2.dilate(edges, dil_k, iterations=2)
-        contours, _ = cv2.findContours(
-            edges_dil, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-        )
+        # ── Step 1 : contour → convex hull → fitEllipse (no circle assumption) ─
+        k_close  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+        closed   = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, k_close, iterations=2)
+        contours, _ = cv2.findContours(closed, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
 
-        best_ellipse = None
-        best_density = -1.0
-        min_area     = math.pi * min_r * min_r * 0.4
+        best_ell      = None
+        best_rs       = float('-inf')
+        min_cnt_area  = math.pi * min_r * min_r * 0.4
 
         for cnt in contours:
-            if len(cnt) < 50 or cv2.contourArea(cnt) < min_area:
+            if len(cnt) < 50 or cv2.contourArea(cnt) < min_cnt_area:
+                continue
+            hull = cv2.convexHull(cnt)
+            if len(hull) < 5:
+                continue
+            # Reject if the raw contour fills < 30 % of its convex hull
+            # (avoids fitting ellipses to thin curvy lines)
+            if cv2.contourArea(cnt) / (cv2.contourArea(hull) + 1e-6) < 0.30:
                 continue
             try:
-                ellipse = cv2.fitEllipse(cnt)
+                ell = cv2.fitEllipse(hull)
             except cv2.error:
                 continue
-
-            (ex, ey), (axis_a, axis_b), _ = ellipse
-            if axis_b < 1 or axis_a / axis_b > 2.2:
+            (ex, ey), (ma, mi), _ = ell
+            if mi < 1 or ma / mi > 2.5:
                 continue
-            r_avg = (axis_a + axis_b) / 4.0
+            r_avg = (ma + mi) / 4.0
             if not (min_r <= r_avg <= max_r):
                 continue
+            s = ring_score(ex, ey, r_avg)
+            if s > best_rs:
+                best_rs  = s
+                best_ell = ell
 
-            # Densité de contours dans l'ellipse
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.ellipse(mask, ellipse, 255, -1)
-            n_inside = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=mask))
-            n_area   = cv2.countNonZero(mask)
-            density  = n_inside / n_area if n_area > 0 else 0.0
+        # ── Step 2 : Hough fallback (if no good contour candidate) ────────────
+        hough_cx = hough_cy = hough_r = None
+        if best_ell is None:
+            hough_best_rs = float('-inf')
+            for param2 in (50, 38, 28):
+                circles = cv2.HoughCircles(
+                    blurred, cv2.HOUGH_GRADIENT,
+                    dp=1, minDist=min(h, w) // 3,
+                    param1=80, param2=param2,
+                    minRadius=min_r, maxRadius=max_r,
+                )
+                if circles is not None:
+                    for c in circles[0]:
+                        s = ring_score(int(c[0]), int(c[1]), int(c[2]))
+                        if s > hough_best_rs:
+                            hough_best_rs = s
+                            hough_cx, hough_cy, hough_r = int(c[0]), int(c[1]), int(c[2])
+                    break   # stop at first param2 that detects anything
 
-            if density > best_density:
-                best_density = density
-                best_ellipse = ellipse
+            if hough_cx is not None:
+                # Try to upgrade the Hough circle to an accurate ellipse
+                ell = fit_rim_ellipse(hough_cx, hough_cy, hough_r)
+                if ell is not None:
+                    best_ell = ell
+                else:
+                    # No good ellipse fit — store as plain circle
+                    self.board_ellipse = None
+                    self.board_center  = (hough_cx, hough_cy)
+                    self.board_radius  = hough_r
+                    return {
+                        "status": "ok",
+                        "center": [hough_cx, hough_cy],
+                        "radius": hough_r,
+                    }
 
-        if best_ellipse is not None:
-            (ex, ey), (axis_a, axis_b), _ = best_ellipse
-            self.board_center = (int(ex), int(ey))
-            self.board_radius = int((axis_a + axis_b) / 4.0)
+        if best_ell is None:
             return {
-                "status": "ok",
-                "center": list(self.board_center),
-                "radius": self.board_radius,
+                "error": (
+                    "Aucune cible détectée. Améliorez l'éclairage "
+                    "ou utilisez la calibration manuelle."
+                )
             }
 
+        # ── Refine: fit the ellipse on the rim edges for better precision ──────
+        (ex0, ey0), (ma0, mi0), _ = best_ell
+        r0 = (ma0 + mi0) / 4.0
+        refined = fit_rim_ellipse(ex0, ey0, r0)
+        if refined is not None:
+            best_ell = refined
+
+        (ex, ey), (ma, mi), _ = best_ell
+        aspect = ma / mi if mi > 0 else 1.0
+        self.board_center  = (int(ex), int(ey))
+        self.board_radius  = int((ma + mi) / 4.0)
+        self.board_ellipse = best_ell if aspect >= 1.05 else None
         return {
-            "error": (
-                "Aucun cercle détecté. Essayez d'améliorer l'éclairage "
-                "ou utilisez la calibration manuelle."
-            )
+            "status": "ok",
+            "center": list(self.board_center),
+            "radius": self.board_radius,
         }
 
     def calibrate_manual(self, cx: float, cy: float, radius: float) -> None:
