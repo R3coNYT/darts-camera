@@ -6,7 +6,6 @@ Endpoints:
   GET  /video_feed            → MJPEG stream (camera)
   GET  /api/camera/frame      → single JPEG snapshot
   POST /api/camera/calibrate  → auto-detect board circle
-  POST /api/camera/calibrate_manual → set board region manually
   POST /api/camera/background → set background reference frame
   GET  /api/camera/detect     → detect darts in current frame vs background
   POST /api/game/new          → start a new game
@@ -149,27 +148,6 @@ def calibrate_auto():
     if "error" in result:
         return jsonify(result), 400
     return jsonify(result)
-
-
-@app.route("/api/camera/calibrate_manual", methods=["POST"])
-def calibrate_manual():
-    if not detector:
-        return jsonify({"error": "Caméra non initialisée."}), 400
-    data = request.get_json(force=True) or {}
-    try:
-        cx = float(data["center_x"])
-        cy = float(data["center_y"])
-        r  = float(data["radius"])
-    except (KeyError, TypeError, ValueError):
-        return jsonify({"error": "Paramètres invalides (center_x, center_y, radius)."}), 400
-    ellipse_fitted = detector.calibrate_manual(cx, cy, r)
-    return jsonify({
-        "status":         "ok",
-        "center":         list(detector.board_center),
-        "radius":         detector.board_radius,
-        "ellipse_fitted": ellipse_fitted,
-    })
-
 
 @app.route("/api/camera/background", methods=["POST"])
 def set_background():

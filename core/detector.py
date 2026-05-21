@@ -178,217 +178,141 @@ class DartDetector:
 
     def calibrate_auto(self) -> dict:
         """
-        Detect the dartboard and store its ellipse for perspective-aware scoring.
-
-        Strategy
-        --------
-        1. Hough circles across a broad radius range (15 %–82 % of frame) so
-           that boards which fill most of the frame are found correctly.
-        2. All candidates from all Hough parameter sweeps are scored with the
-           ring-structure metric and the globally best one is kept.
-        3. A tight-annulus (90 %–110 %) ellipse fit refines the circle to an
-           ellipse that captures camera angle, validated against centre drift.
+        Calibration auto basée sur les anneaux rouge/vert de la cible.
+        On détecte le bord extérieur du double, pas la bordure noire avec les numéros.
         """
         with self._lock:
             if self._current_frame is None:
                 return {"error": "Aucune image disponible."}
             frame = self._current_frame.copy()
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
+        ell = self._fit_scoring_ellipse_from_colors(frame)
 
-        img_cx, img_cy = w // 2, h // 2
-        max_center_dist = min(h, w) * 0.50   # board centre may be up to half-width off
-
-        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        blurred  = cv2.GaussianBlur(enhanced, (9, 9), 2)
-        edges    = cv2.Canny(blurred, 30, 100)
-
-        # Allow boards from 15 % up to 82 % of the shorter frame dimension.
-        # 82 % at 720 p ≈ 590 px  →  covers boards that nearly fill the frame.
-        min_r = int(min(h, w) * 0.15)
-        max_r = int(min(h, w) * 0.82)
-
-        # ── Ring-structure scorer ──────────────────────────────────────────────
-        _FRACS = (0.09, 0.57, 0.63, 0.95, 1.00)
-        _HW    = 0.05
-
-        def ring_score(cx_, cy_, r_):
-            log_sum = 0.0
-            n_valid = 0
-            for f in _FRACS:
-                rr   = max(3, int(r_ * f))
-                dr   = max(2, int(r_ * _HW))
-                ann  = np.zeros((h, w), dtype=np.uint8)
-                cv2.circle(ann, (int(cx_), int(cy_)), rr + dr, 255, -1)
-                cv2.circle(ann, (int(cx_), int(cy_)), max(0, rr - dr), 0, -1)
-                area = cv2.countNonZero(ann)
-                if area == 0:
-                    continue
-                n    = cv2.countNonZero(cv2.bitwise_and(edges, edges, mask=ann))
-                log_sum += math.log(max(n, 1) / area)
-                n_valid += 1
-            return log_sum / n_valid if n_valid else float('-inf')
-
-        # ── Tight-annulus ellipse refinement ──────────────────────────────────
-        def fit_rim_ellipse(cx_, cy_, r_):
-            inner = max(1, int(r_ * 0.90))
-            outer = int(r_ * 1.10)
-            ann   = np.zeros((h, w), dtype=np.uint8)
-            cv2.circle(ann, (int(cx_), int(cy_)), outer, 255, -1)
-            cv2.circle(ann, (int(cx_), int(cy_)), inner, 0, -1)
-            rim  = cv2.bitwise_and(edges, edges, mask=ann)
-            cnts, _ = cv2.findContours(rim, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-            valid = [c for c in cnts if len(c) >= 5]
-            if not valid:
-                return None
-            all_pts = np.vstack(valid)
-            if len(all_pts) < 60:
-                return None
-            try:
-                ell = cv2.fitEllipse(all_pts)
-            except cv2.error:
-                return None
-            (_, _), (ma, mi), _ = ell
-            if mi < 1 or ma / mi > 2.0:
-                return None
-            return ell
-
-        # ── Step 1: Hough circles – collect & score ALL candidates ────────────
-        # Use dp=1 (full-resolution accumulator) and sweep param2 from strict
-        # to lenient; score every unique candidate and keep the global best.
-        candidates: list = []   # (ring_score, cx, cy, r)
-        seen: list = []          # (cx, cy, r) already evaluated
-
-        def already_seen(cx_, cy_, cr_):
-            for scx, scy, scr in seen:
-                if (abs(cx_ - scx) < 20 and abs(cy_ - scy) < 20
-                        and abs(cr_ - scr) < 30):
-                    return True
-            return False
-
-        for param2 in (60, 45, 35, 25, 18):
-            circles = cv2.HoughCircles(
-                blurred, cv2.HOUGH_GRADIENT,
-                dp=1,
-                minDist=max(min_r, min(h, w) // 3),
-                param1=80, param2=param2,
-                minRadius=min_r, maxRadius=max_r,
-            )
-            if circles is None:
-                continue
-            for c in circles[0]:
-                ccx, ccy, cr = float(c[0]), float(c[1]), float(c[2])
-                if math.sqrt((ccx - img_cx) ** 2 + (ccy - img_cy) ** 2) > max_center_dist:
-                    continue
-                if already_seen(ccx, ccy, cr):
-                    continue
-                seen.append((ccx, ccy, cr))
-                s = ring_score(ccx, ccy, cr)
-                candidates.append((s, ccx, ccy, cr))
-
-        if not candidates:
+        if ell is None:
             return {
                 "error": (
-                    "Aucune cible détectée. "
-                    "Améliorez l'éclairage ou utilisez la calibration manuelle."
+                    "Impossible de détecter correctement les anneaux rouge/vert. "
+                    "Essaie avec plus de lumière ou utilise la calibration manuelle."
                 )
             }
 
-        # Best ring-structure score wins.
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        best_rs, best_cx, best_cy, best_r = candidates[0]
+        (ex, ey), (axis_a, axis_b), angle = ell
 
-        # ── Step 2: Ellipse refinement ────────────────────────────────────────
-        ell = fit_rim_ellipse(best_cx, best_cy, best_r)
-        if ell is not None:
-            (ex, ey), (ma, mi), _ = ell
-            drift = math.sqrt((ex - best_cx) ** 2 + (ey - best_cy) ** 2)
-            if drift < best_r * 0.30:
-                self.board_ellipse = ell
-                self.board_center  = (int(ex), int(ey))
-                self.board_radius  = int((ma + mi) / 4.0)
-                return {
-                    "status": "ok",
-                    "center": list(self.board_center),
-                    "radius": self.board_radius,
-                }
+        self.board_ellipse = ell
+        self.board_center = (int(ex), int(ey))
 
-        # ── Step 3: Plain circle fallback ─────────────────────────────────────
-        self.board_ellipse = None
-        self.board_center  = (int(best_cx), int(best_cy))
-        self.board_radius  = int(best_r)
+        # Rayon moyen uniquement pour l'affichage / fallback.
+        # Pour le scoring, _to_board_norm utilise directement board_ellipse.
+        self.board_radius = int((axis_a + axis_b) / 4.0)
+
         return {
             "status": "ok",
             "center": list(self.board_center),
             "radius": self.board_radius,
-        }
+            "ellipse": {
+                "axes": [int(axis_a), int(axis_b)],
+                "angle": float(angle),
+        },
+    }
 
-    def calibrate_manual(self, cx: float, cy: float, radius: float) -> bool:
+    def _fit_scoring_ellipse_from_colors(self, frame):
         """
-        Set board region from user-provided centre + radius.
-        Automatically upgrades to an ellipse by fitting to the actual rim
-        edges at the specified location (corrects camera tilt/perspective).
-        Returns True if an ellipse was fitted, False if a plain circle is kept.
+        Détecte les zones rouges/vertes de la cible, récupère les points les plus
+        externes par angle, puis fit une ellipse correspondant au bord extérieur
+        du double.
         """
-        self.board_center  = (int(cx), int(cy))
-        self.board_radius  = int(radius)
-        self.board_ellipse = None
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        h, w = hsv.shape[:2]
 
-        ell = self._fit_ellipse_at(cx, cy, radius)
-        if ell is not None:
-            self.board_ellipse = ell
-            (ex, ey), (ma, mi), _ = ell
-            self.board_center = (int(ex), int(ey))
-            self.board_radius = int((ma + mi) / 4.0)
-            return True
-        return False
+        # Masque rouge : deux plages car le rouge est coupé autour de 0/180 en HSV
+        red_1 = cv2.inRange(hsv, (0, 35, 25), (12, 255, 230))
+        red_2 = cv2.inRange(hsv, (165, 35, 25), (180, 255, 230))
 
-    def _fit_ellipse_at(self, cx: float, cy: float, r: float):
-        """
-        Fit an ellipse to the board rim by collecting Canny edge pixels in a
-        wide annulus (80 %–120 % of r) centred at (cx, cy).
-        Returns an OpenCV ellipse tuple, or None if the fit is poor.
-        """
-        with self._lock:
-            if self._current_frame is None:
-                return None
-            frame = self._current_frame.copy()
+        # Masque vert de la cible
+        green = cv2.inRange(hsv, (35, 30, 20), (95, 255, 230))
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        h, w = gray.shape
+        mask = cv2.bitwise_or(red_1, red_2)
+        mask = cv2.bitwise_or(mask, green)
 
-        clahe    = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        enhanced = clahe.apply(gray)
-        blurred  = cv2.GaussianBlur(enhanced, (9, 9), 2)
-        edges    = cv2.Canny(blurred, 30, 100)
+        # Nettoyage du masque
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        inner = max(1, int(r * 0.82))
-        outer = min(int(r * 1.18), min(h, w))
-        ann   = np.zeros((h, w), dtype=np.uint8)
-        cv2.circle(ann, (int(cx), int(cy)), outer, 255, -1)
-        cv2.circle(ann, (int(cx), int(cy)), inner, 0, -1)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        rim     = cv2.bitwise_and(edges, edges, mask=ann)
-        cnts, _ = cv2.findContours(rim, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-        valid   = [c for c in cnts if len(c) >= 5]
-        if not valid:
+        pts_list = []
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if area < 20:
+                continue
+            pts_list.append(c.reshape(-1, 2))
+
+        if not pts_list:
             return None
-        all_pts = np.vstack(valid)
-        if len(all_pts) < 50:
+
+        pts = np.vstack(pts_list).astype(np.float32)
+
+        # Centre approximatif avec les pixels rouge/vert
+        cx0 = float(np.mean(pts[:, 0]))
+        cy0 = float(np.mean(pts[:, 1]))
+
+        dx = pts[:, 0] - cx0
+        dy = pts[:, 1] - cy0
+
+        dist2 = dx * dx + dy * dy
+        angles = (np.degrees(np.arctan2(dy, dx)) + 360.0) % 360.0
+
+        # Pour chaque angle, on garde les points les plus éloignés :
+        # ils correspondent normalement au double extérieur.
+        outer_pts = []
+        bins = 180  # 2 degrés par bin
+
+        for b in range(bins):
+            a_min = b * (360.0 / bins)
+            a_max = (b + 1) * (360.0 / bins)
+
+            idx = np.where((angles >= a_min) & (angles < a_max))[0]
+            if len(idx) == 0:
+                continue
+
+            # On garde les 2 points les plus externes pour stabiliser l'ellipse
+            best = idx[np.argsort(dist2[idx])[-2:]]
+            outer_pts.extend(pts[best])
+
+        outer_pts = np.array(outer_pts, dtype=np.float32)
+
+        if len(outer_pts) < 40:
             return None
+
         try:
-            ell = cv2.fitEllipse(all_pts)
+            ell = cv2.fitEllipse(outer_pts.reshape(-1, 1, 2))
         except cv2.error:
             return None
 
-        (ex, ey), (ma, mi), _ = ell
-        if mi < 1 or ma / mi > 2.2:
+        (ex, ey), (axis_a, axis_b), angle = ell
+
+        small_axis = min(axis_a, axis_b)
+        big_axis = max(axis_a, axis_b)
+
+        # Validation basique
+        if small_axis < min(h, w) * 0.20:
             return None
-        # Reject if the fitted centre drifted too far from the user's click
-        if math.sqrt((ex - cx) ** 2 + (ey - cy) ** 2) > r * 0.25:
+
+        if big_axis > min(h, w) * 1.05:
             return None
+
+        if big_axis / small_axis > 2.2:
+            return None
+
+        if not (0 <= ex < w and 0 <= ey < h):
+            return None
+
+        # Légère marge pour être bien sur le bord extérieur du double
+        # Si ton cercle est un peu trop grand/petit, ajuste 1.00 à 1.03.
+        SCALE = 1.015
+        ell = ((ex, ey), (axis_a * SCALE, axis_b * SCALE), angle)
+
         return ell
 
     def _to_board_norm(self, px: float, py: float) -> Tuple[float, float]:
