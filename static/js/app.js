@@ -25,12 +25,13 @@ const SEG_EVEN = { single: '#1a1a1f', triple: '#1b6e3b', double: '#1b6e3b' };
 const SEG_ODD  = { single: '#e8e0c8', triple: '#8b1a1a', double: '#8b1a1a' };
 
 // ── State ──────────────────────────────────────────────────────────
-let gameState    = null;
-let currentMult  = 1;         // selected multiplier in manual entry
-let selectedMode = '501';
+let gameState       = null;
+let currentMult     = 1;
+let selectedMode    = '501';
 let cameraAvailable = false;
-let calStep      = 0;         // camera manual calibration step (0=idle,1=centre,2=edge)
-let calCentre    = null;
+let autoDetectActive = false;
+let calStep         = 0;
+let calCentre       = null;
 
 // ── DOM refs ───────────────────────────────────────────────────────
 const modalSetup      = document.getElementById('modal-setup');
@@ -87,9 +88,22 @@ socket.on('turn_ended', result => {
 
 socket.on('detection_result', ({ darts, error }) => {
   if (error) { showToast(error, 'bust'); return; }
-  if (!darts || darts.length === 0) { showToast('Aucune fléchette détectée', 'info'); return; }
-  // Auto-register detected darts
-  darts.forEach(d => apiThrow(d.score, d.label, d.x_norm, d.y_norm));
+  if (!darts) return;
+  // Flash the camera border to signal detection
+  triggerDetectFlash();
+  // Only register darts BEYOND what's already counted this turn
+  const already = gameState?.current_turn_darts?.length ?? 0;
+  const newOnes = darts.slice(already);
+  if (darts.length === 0 && !autoDetectActive) showToast('Aucune fléchette détectée', 'info');
+  newOnes.forEach(d => apiThrow(d.score, d.label, d.x ?? null, d.y ?? null));
+  if (newOnes.length > 0) setDetectState('detected', `${darts.length} fléchette${darts.length > 1 ? 's' : ''} détectée${darts.length > 1 ? 's' : ''}`);
+});
+
+socket.on('auto_detect_status', ({ active }) => {
+  autoDetectActive = active;
+  const btn = document.getElementById('btn-auto-detect');
+  if (btn) btn.dataset.active = active ? 'true' : 'false';
+  setDetectState(active ? 'listening' : 'idle', active ? 'Écoute en cours…' : 'Prêt');
 });
 
 // ============================================================
@@ -114,7 +128,6 @@ function addPlayerRow(name = '', team = '') {
   row.className = 'player-input-row';
   row.innerHTML = `
     <input type="text" class="player-name-input" placeholder="Nom du joueur" value="${name}"/>
-    <input type="text" class="team-input" placeholder="Équipe" value="${team}"/>
     <button class="btn-remove-player" title="Retirer">✕</button>`;
   row.querySelector('.btn-remove-player').addEventListener('click', () => {
     if (document.querySelectorAll('.player-input-row').length > 1) row.remove();
@@ -125,9 +138,6 @@ addPlayerRow('Joueur 1');
 
 document.getElementById('btn-add-player').addEventListener('click', () => {
   addPlayerRow(`Joueur ${document.querySelectorAll('.player-input-row').length + 1}`);
-});
-document.getElementById('btn-add-team').addEventListener('click', () => {
-  addPlayerRow('', 'Équipe A');
 });
 
 document.getElementById('btn-start-game').addEventListener('click', startGame);
@@ -160,9 +170,10 @@ async function startGame() {
 function renderAll() {
   if (!gameState) return;
   updateHeader();
-  updateDartSlots();
+  updateThrowsBar();
   updateCurrentPlayerCard();
   updateScoreboard();
+  updateHistory();
   drawBoard();
 }
 
@@ -171,28 +182,40 @@ function updateHeader() {
   document.getElementById('hdr-round').textContent = `Round ${gameState.round}`;
 }
 
-function updateDartSlots() {
+function updateThrowsBar() {
   const darts  = gameState.current_turn_darts || [];
   const busted = gameState.current_turn_busted;
   let total = 0;
   for (let i = 1; i <= 3; i++) {
-    const slot   = document.getElementById(`dart-slot-${i}`);
-    const numEl  = slot.querySelector('.dart-num');
+    const slot   = document.getElementById(`slot-${i}`);
+    if (!slot) continue;
+    const lblEl  = slot.querySelector('.ts-label');
+    const ptsEl  = slot.querySelector('.ts-pts');
     const dart   = darts[i - 1];
-    slot.className = 'dart-slot';
+    slot.className = 'throw-slot';
     if (dart) {
-      numEl.textContent = dart.label;
-      numEl.className   = 'dart-num' + (dart.label === 'MISS' ? ' miss' : '');
-      slot.classList.add(busted ? 'busted' : 'filled');
+      lblEl.textContent = dart.label;
+      ptsEl.textContent = dart.score + ' pts';
       total += dart.score;
+      if (busted) {
+        slot.classList.add('bust');
+      } else if (dart.label?.startsWith('T')) {
+        slot.classList.add('filled', 'triple');
+      } else if (dart.label?.startsWith('D') && dart.label !== 'DB') {
+        slot.classList.add('filled', 'double');
+      } else {
+        slot.classList.add('filled');
+      }
     } else {
-      numEl.textContent = '–';
-      numEl.className   = 'dart-num';
+      lblEl.textContent = '–';
+      ptsEl.textContent = '';
     }
   }
-  const totalEl = document.getElementById('turn-total-display');
-  totalEl.textContent = busted ? 'Bust !' : `${total} pts`;
-  totalEl.style.color = busted ? 'var(--warn)' : 'var(--text)';
+  const totalEl = document.getElementById('throw-total-val');
+  const bustEl  = document.getElementById('throw-bust-label');
+  if (totalEl) totalEl.textContent = `${total} pts`;
+  if (bustEl)  bustEl.classList.toggle('hidden', !busted);
+  if (totalEl) totalEl.classList.toggle('hidden', !!busted);
 }
 
 function updateCurrentPlayerCard() {
@@ -607,6 +630,10 @@ document.getElementById('btn-undo').addEventListener('click', apiUndo);
 
 // New game
 document.getElementById('btn-new-game').addEventListener('click', () => {
+  // Stop auto-detect if running
+  if (autoDetectActive) {
+    apiFetch('/api/camera/auto_detect', 'POST', { active: false });
+  }
   appDiv.classList.add('hidden');
   modalSetup.classList.add('active');
   gameState = null;
@@ -631,27 +658,31 @@ document.querySelectorAll('.tab-bar .tab').forEach(tab => {
   });
 });
 
-// Camera panel
-document.getElementById('btn-camera-panel').addEventListener('click', () => {
-  document.getElementById('camera-panel').classList.toggle('hidden');
-});
-document.getElementById('btn-close-cam-panel').addEventListener('click', () => {
-  document.getElementById('camera-panel').classList.add('hidden');
-});
+// Camera panel references removed – camera is always in main tab
 
 // Camera controls
 document.getElementById('btn-set-bg').addEventListener('click', async () => {
   const r = await apiFetch('/api/camera/background', 'POST');
+  const msg = document.getElementById('cal-status-text');
+  if (msg) msg.textContent = r.error ? '' : 'Fond défini ✓';
   showToast(r.error ? r.error : 'Fond défini ✓', r.error ? 'bust' : 'info');
 });
 document.getElementById('btn-calibrate').addEventListener('click', async () => {
   const r = await apiFetch('/api/camera/calibrate', 'POST');
+  const msg = document.getElementById('cal-status-text');
+  if (msg) msg.textContent = r.error ? '' : `Cible calibrée ✓  r=${r.radius}px`;
   showToast(r.error ? r.error : `Cible calibrée ✓ (r=${r.radius}px)`, r.error ? 'bust' : 'info');
 });
-document.getElementById('btn-detect').addEventListener('click', () => {
-  socket.emit('request_detect');
-  showToast('Détection en cours…', 'info');
+document.getElementById('btn-detect').addEventListener('click', async () => {
+  const r = await apiFetch('/api/camera/detect', 'GET');
+  if (r.error) showToast(r.error, 'bust');
+  else showToast('Détection lancée…', 'info');
 });
+document.getElementById('btn-auto-detect').addEventListener('click', async () => {
+  const r = await apiFetch('/api/camera/auto_detect', 'POST');
+  if (r.error) showToast(r.error, 'bust');
+});
+
 
 // ============================================================
 //   API HELPERS
@@ -674,6 +705,56 @@ async function apiUndo() {
   if (res.error) showToast(res.error, 'bust');
   else showToast(`Annulé : ${res.result?.undone}`, 'info');
 }
+
+// ============================================================
+//   HISTORY
+// ============================================================
+
+function updateHistory() {
+  const el = document.getElementById('hist-rows');
+  if (!el || !gameState) return;
+  const players = gameState.players || [];
+  // Collect all recent turns from all players
+  const rows = [];
+  players.forEach(p => {
+    (p.recent_turns || []).forEach(t => {
+      rows.push({ player: p.name, turn: t });
+    });
+  });
+  // Show last 8, most-recent first
+  el.innerHTML = '';
+  rows.slice(-8).reverse().forEach(({ player, turn }) => {
+    const div = document.createElement('div');
+    div.className = 'hist-row' + (turn.busted ? ' busted' : '');
+    const labels = (turn.darts || []).map(d => d.label).join('  ');
+    div.innerHTML = `
+      <span class="hist-player">${esc(player.slice(0, 10))}</span>
+      <span class="hist-throws">${labels || '–'}</span>
+      <span class="hist-total">${turn.busted ? 'BUST' : turn.scored}</span>`;
+    el.appendChild(div);
+  });
+}
+
+// ============================================================
+//   DETECT STATE UI
+// ============================================================
+
+function setDetectState(state, text) {
+  const el    = document.getElementById('detect-state');
+  const label = document.getElementById('ds-label');
+  if (el)    el.className = 'detect-state ' + state;
+  if (label) label.textContent = text;
+}
+
+function triggerDetectFlash() {
+  const el = document.getElementById('detect-flash');
+  if (!el) return;
+  el.classList.remove('active');
+  void el.offsetWidth; // force reflow
+  el.classList.add('active');
+  setTimeout(() => el.classList.remove('active'), 700);
+}
+
 
 async function apiFetch(url, method = 'GET', body = null) {
   const opts = {

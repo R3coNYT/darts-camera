@@ -8,14 +8,13 @@
 </head>
 <body>
 
-<!-- ============================================================
+<!-- ════════════════════════════════════════════════════════════════
      SETUP MODAL
-============================================================ -->
+════════════════════════════════════════════════════════════════ -->
 <div id="modal-setup" class="modal-overlay active">
   <div class="modal-box">
     <h1 class="modal-title">🎯 DartsCamera</h1>
 
-    <!-- Mode de jeu -->
     <div class="section-label">Mode de jeu</div>
     <div class="mode-grid">
       <button class="mode-btn active" data-mode="501">501</button>
@@ -25,7 +24,6 @@
       <button class="mode-btn" data-mode="free">Libre</button>
     </div>
 
-    <!-- Options x01 -->
     <div id="x01-options" class="x01-options">
       <label class="toggle-label">
         <input type="checkbox" id="opt-double-out" checked/>
@@ -37,24 +35,22 @@
       </label>
     </div>
 
-    <!-- Joueurs -->
     <div class="section-label">Joueurs</div>
     <div id="player-list" class="player-list"></div>
     <div class="modal-row">
       <button id="btn-add-player" class="btn-ghost">+ Ajouter un joueur</button>
-      <button id="btn-add-team" class="btn-ghost">+ Équipe</button>
     </div>
 
     <button id="btn-start-game" class="btn-primary btn-large">Commencer la partie</button>
   </div>
 </div>
 
-<!-- ============================================================
-     MAIN APP (hidden until game starts)
-============================================================ -->
+<!-- ════════════════════════════════════════════════════════════════
+     MAIN APP
+════════════════════════════════════════════════════════════════ -->
 <div id="app" class="hidden">
 
-  <!-- Header -->
+  <!-- Header ─────────────────────────────────────────────────── -->
   <header class="app-header">
     <div class="header-left">
       <span class="logo">🎯 DartsCamera</span>
@@ -63,31 +59,60 @@
     </div>
     <div class="header-right">
       <span id="cam-indicator" class="cam-dot offline" title="Caméra"></span>
-      <button id="btn-camera-panel" class="btn-icon" title="Caméra">📷</button>
       <button id="btn-new-game" class="btn-ghost btn-sm">Nouvelle partie</button>
     </div>
   </header>
 
-  <!-- Main layout -->
+  <!-- 3-column grid ──────────────────────────────────────────── -->
   <div class="game-layout">
 
-    <!-- ── LEFT: Scoreboard ─────────────────────────────────────────── -->
+    <!-- ── LEFT: Scoreboard + History ──────────────────────────── -->
     <aside class="scoreboard-panel" id="scoreboard-panel">
-      <div id="scoreboard-x01" class="scoreboard-x01"></div>
+      <div id="scoreboard-x01"     class="scoreboard-x01"></div>
       <div id="scoreboard-cricket" class="scoreboard-cricket hidden"></div>
-      <div id="scoreboard-atc" class="scoreboard-atc hidden"></div>
+      <div id="scoreboard-atc"     class="scoreboard-atc hidden"></div>
+
+      <!-- Round history -->
+      <div id="scoreboard-history" class="scoreboard-history">
+        <div class="hist-title">HISTORIQUE</div>
+        <div id="hist-rows"></div>
+      </div>
     </aside>
 
-    <!-- ── CENTER: Board + Camera ────────────────────────────────────── -->
+    <!-- ── CENTER: Camera / Board + Throws bar ──────────────────── -->
     <section class="board-section">
 
-      <!-- Tab bar: Board / Camera -->
+      <!-- Tab bar: Camera (default) / Board -->
       <div class="tab-bar">
-        <button class="tab active" data-tab="board">Cible</button>
-        <button class="tab" data-tab="camera">Caméra</button>
+        <button class="tab active" data-tab="camera">📷 Caméra</button>
+        <button class="tab"        data-tab="board" >🎯 Cible</button>
       </div>
 
-      <div id="tab-board" class="tab-content active">
+      <!-- Camera tab (default active) -->
+      <div id="tab-camera" class="tab-content active">
+        <div class="camera-wrapper" id="cam-wrap">
+          <img id="camera-feed" src="" alt="" class="camera-img hidden"/>
+          <canvas id="cam-overlay" class="cam-overlay"></canvas>
+          <div id="no-camera-msg" class="no-camera">
+            📷 Caméra non disponible<br/>
+            <small>Vérifiez la connexion et config.yaml</small>
+          </div>
+          <!-- Flash ring on detection -->
+          <div id="detect-flash" class="detect-flash"></div>
+        </div>
+        <div class="camera-controls">
+          <button id="btn-set-bg"       class="btn-ghost btn-sm">📸 Fond</button>
+          <button id="btn-calibrate"    class="btn-ghost btn-sm">🔵 Calibrer</button>
+          <button id="btn-detect"       class="btn-ghost btn-sm">⚡ Détecter</button>
+          <button id="btn-auto-detect"  class="btn-ghost btn-sm btn-auto" data-active="false">
+            <span class="auto-dot"></span> AUTO
+          </button>
+          <span id="cal-status-text" class="cal-status-text"></span>
+        </div>
+      </div>
+
+      <!-- Board tab -->
+      <div id="tab-board" class="tab-content">
         <div class="canvas-wrapper">
           <canvas id="board-canvas"></canvas>
           <img id="cam-pip" src="" alt="" class="cam-pip hidden"/>
@@ -95,42 +120,44 @@
         </div>
       </div>
 
-      <div id="tab-camera" class="tab-content">
-        <div class="camera-wrapper">
-          <img id="camera-feed" src="" alt="Flux caméra" class="camera-img"/>
-          <div id="no-camera-msg" class="no-camera">
-            📷 Caméra non disponible<br/>
-            <small>Vérifiez la connexion et la config.yaml</small>
-          </div>
+      <!-- Throws bar ────────────────────────────────────────── -->
+      <div class="throws-bar">
+        <div class="throw-slot" id="slot-1">
+          <div class="ts-label">–</div>
+          <div class="ts-pts"></div>
         </div>
-        <div class="camera-controls">
-          <button id="btn-set-bg" class="btn-ghost btn-sm">📸 Définir fond</button>
-          <button id="btn-calibrate" class="btn-ghost btn-sm">🔵 Calibrer (auto)</button>
-          <button id="btn-detect" class="btn-primary btn-sm">🎯 Détecter fléchettes</button>
+        <div class="throw-slot" id="slot-2">
+          <div class="ts-label">–</div>
+          <div class="ts-pts"></div>
         </div>
-      </div>
-
-      <!-- Current turn darts display -->
-      <div class="turn-display">
-        <div class="dart-indicators">
-          <div class="dart-slot" id="dart-slot-1"><span class="dart-num">-</span></div>
-          <div class="dart-slot" id="dart-slot-2"><span class="dart-num">-</span></div>
-          <div class="dart-slot" id="dart-slot-3"><span class="dart-num">-</span></div>
+        <div class="throw-slot" id="slot-3">
+          <div class="ts-label">–</div>
+          <div class="ts-pts"></div>
         </div>
-        <div id="turn-total-display" class="turn-total-display">0 pts</div>
+        <div class="throw-sum">
+          <div id="throw-total-val" class="throw-total-num">0 pts</div>
+          <div id="throw-bust-label" class="throw-bust-badge hidden">BUST!</div>
+        </div>
       </div>
 
     </section>
 
-    <!-- ── RIGHT: Player info + Controls ─────────────────────────────── -->
+    <!-- ── RIGHT: Player card + Detection state + Manual entry ── -->
     <aside class="info-panel">
 
-      <!-- Current player card -->
+      <!-- Current player card (big score) -->
       <div class="current-player-card" id="current-player-card">
-        <div class="cp-name" id="cp-name">—</div>
-        <div class="cp-score" id="cp-score">501</div>
+        <div class="cp-turn-label">▶ AU TOUR DE</div>
+        <div class="cp-name"     id="cp-name">—</div>
+        <div class="cp-score"    id="cp-score">501</div>
         <div class="cp-checkout" id="cp-checkout"></div>
-        <div class="cp-stats" id="cp-stats"></div>
+        <div class="cp-stats"    id="cp-stats"></div>
+      </div>
+
+      <!-- Auto-detection state indicator -->
+      <div id="detect-state" class="detect-state">
+        <span class="ds-pulse"></span>
+        <span id="ds-label">Prêt</span>
       </div>
 
       <!-- Manual score entry -->
@@ -139,53 +166,29 @@
 
         <div class="multiplier-row">
           <button class="mult-btn active" data-mult="1">Simple</button>
-          <button class="mult-btn" data-mult="2">Double</button>
-          <button class="mult-btn" data-mult="3">Triple</button>
+          <button class="mult-btn"        data-mult="2">Double</button>
+          <button class="mult-btn"        data-mult="3">Triple</button>
         </div>
 
-        <div class="number-grid" id="number-grid">
-          <!-- Filled by JS -->
-        </div>
+        <div class="number-grid" id="number-grid"></div>
 
         <div class="special-btns">
-          <button class="spec-btn" data-label="B" data-score="25">Bull (25)</button>
-          <button class="spec-btn" data-label="DB" data-score="50">Bullseye (50)</button>
-          <button class="spec-btn miss" data-label="MISS" data-score="0">Raté</button>
+          <button class="spec-btn"      data-label="B"    data-score="25">Bull (25)</button>
+          <button class="spec-btn"      data-label="DB"   data-score="50">Bullseye (50)</button>
+          <button class="spec-btn miss" data-label="MISS" data-score="0" >Raté</button>
         </div>
       </div>
 
-      <!-- Action buttons -->
+      <!-- Actions -->
       <div class="action-row">
-        <button id="btn-undo" class="btn-ghost">↩ Annuler</button>
+        <button id="btn-undo"     class="btn-ghost">↩ Annuler</button>
         <button id="btn-end-turn" class="btn-primary">Valider le tour →</button>
       </div>
 
     </aside>
   </div><!-- .game-layout -->
 
-  <!-- Camera panel (slide-over) -->
-  <div id="camera-panel" class="side-panel hidden">
-    <div class="side-panel-header">
-      <span>Paramètres caméra</span>
-      <button id="btn-close-cam-panel" class="btn-icon">✕</button>
-    </div>
-    <div class="side-panel-body">
-      <label class="form-row">
-        Index caméra
-        <input type="number" id="cam-id-input" value="0" min="0" max="9"/>
-      </label>
-      <button id="btn-connect-cam" class="btn-primary btn-sm">Connecter</button>
-      <hr/>
-      <p class="hint-text">
-        Pour la calibration manuelle :<br/>
-        1. Allez sur l'onglet <strong>Caméra</strong><br/>
-        2. Cliquez sur le <strong>centre</strong> de la cible<br/>
-        3. Puis cliquez sur le <strong>bord extérieur</strong>
-      </p>
-    </div>
-  </div>
-
-  <!-- Winner overlay -->
+  <!-- Winner overlay ─────────────────────────────────────────── -->
   <div id="winner-overlay" class="winner-overlay hidden">
     <div class="winner-box">
       <div class="winner-trophy">🏆</div>
@@ -202,3 +205,4 @@
 <script src="/static/js/app.js"></script>
 </body>
 </html>
+

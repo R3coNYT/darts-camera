@@ -48,6 +48,31 @@ socketio = SocketIO(app, async_mode="threading", cors_allowed_origins="*")
 current_game: Optional[Game] = None
 detector: Optional[DartDetector] = None
 config: dict = {}
+_detect_active: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Auto-detection background task
+# ---------------------------------------------------------------------------
+
+def _detection_loop() -> None:
+    """Background task: detect darts every 1.5 s and emit changes via SocketIO."""
+    global _detect_active
+    prev_count = -1
+    socketio.sleep(1.0)          # small startup delay
+    while _detect_active:
+        socketio.sleep(1.5)
+        if not _detect_active:
+            break
+        if detector and detector.board_center and detector._background is not None:
+            try:
+                darts = detector.detect_darts()
+                count = len(darts)
+                if count != prev_count:
+                    prev_count = count
+                    socketio.emit("detection_result", {"darts": darts})
+            except Exception:
+                prev_count = -1
 
 
 def load_config(path: str = "config.yaml") -> dict:
@@ -158,6 +183,21 @@ def detect_darts():
     darts = detector.detect_darts()
     socketio.emit("detection_result", {"darts": darts})
     return jsonify({"darts": darts})
+
+
+@app.route("/api/camera/auto_detect", methods=["POST"])
+def toggle_auto_detect():
+    global _detect_active
+    data = request.get_json(force=True) or {}
+    # If 'active' key provided use it, else toggle
+    if "active" in data:
+        _detect_active = bool(data["active"])
+    else:
+        _detect_active = not _detect_active
+    if _detect_active:
+        socketio.start_background_task(_detection_loop)
+    socketio.emit("auto_detect_status", {"active": _detect_active})
+    return jsonify({"active": _detect_active})
 
 
 # ---------------------------------------------------------------------------

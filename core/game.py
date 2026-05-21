@@ -57,6 +57,13 @@ class Turn:
         if not self.busted:
             self.scored += throw.score
 
+    def to_dict(self) -> dict:
+        return {
+            "darts": [d.to_dict() for d in self.darts],
+            "scored": self.scored,
+            "busted": self.busted,
+        }
+
 
 @dataclass
 class Player:
@@ -103,6 +110,7 @@ class Player:
             "rounds_played": self.rounds_played,
             "avg_per_dart": self.avg_per_dart,
             "avg_per_round": self.avg_per_round,
+            "recent_turns": [t.to_dict() for t in self.turns[-6:]],
         }
 
 

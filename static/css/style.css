@@ -465,45 +465,52 @@ button:active { transform: scale(.97); }
   flex-shrink: 0;
 }
 
-/* Turn display */
-.turn-display {
+/* Throws bar ─────────────────────────────────────────────── */
+.throws-bar {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 20px;
+  align-items: stretch;
+  gap: 8px;
+  padding: 10px 16px;
   background: var(--bg-card);
   border-top: 1px solid var(--border);
   flex-shrink: 0;
 }
-.dart-indicators { display: flex; gap: 8px; }
-
-.dart-slot {
-  width: 64px;
-  height: 40px;
+.throw-slot {
+  flex: 1;
   background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
+  padding: 8px 4px;
   transition: all .2s;
+  min-height: 54px;
 }
-.dart-slot.filled { border-color: var(--accent); background: #00e5ff12; }
-.dart-slot.busted { border-color: var(--warn); background: #ff6b3512; }
-.dart-num {
+.throw-slot.filled { border-color: var(--accent);  background: #00e5ff10; }
+.throw-slot.bust   { border-color: var(--warn);    background: #ff6b3510; }
+.throw-slot.triple { border-color: var(--success); background: #00e67610; }
+.throw-slot.double { border-color: var(--accent2); background: #7c4dff10; }
+.ts-label {
+  font-size: 18px;
   font-weight: 800;
-  font-size: 15px;
   color: var(--text);
+  line-height: 1;
 }
-.dart-num.miss { color: var(--muted); font-weight: 400; }
-.dart-num.bust { color: var(--warn); }
+.ts-pts { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.throw-slot.bust .ts-label { color: var(--warn); }
+.throw-sum {
+  width: 84px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+}
+.throw-total-num   { font-size: 22px; font-weight: 800; color: var(--text); }
+.throw-bust-badge  { font-size: 14px; font-weight: 800; letter-spacing: 1px; color: var(--warn); }
 
-.turn-total-display {
-  margin-left: auto;
-  font-size: 22px;
-  font-weight: 800;
-  color: var(--text);
-}
 
 /* ===================================================================
    INFO PANEL (right)
@@ -531,12 +538,23 @@ button:active { transform: scale(.97); }
   letter-spacing: .8px;
   margin-bottom: 4px;
 }
+.cp-turn-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
 .cp-score {
-  font-size: 56px;
+  font-size: 72px;
   font-weight: 900;
   color: var(--accent);
   line-height: 1;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -3px;
+  text-shadow: 0 0 30px rgba(0,229,255,.4);
 }
 .cp-checkout {
   font-size: 13px;
@@ -748,3 +766,153 @@ button:active { transform: scale(.97); }
   html, body { overflow: auto; }
   #app { height: auto; }
 }
+
+/* ===================================================================
+   AUTODARTS-STYLE ADDITIONS
+   =================================================================== */
+
+/* Current player turn indicator */
+.cp-turn-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.4px;
+  color: var(--accent);
+  margin-bottom: 2px;
+}
+
+/* Camera overlay canvas (dart markers) */
+.cam-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* Detection flash ring on camera */
+.detect-flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 3px solid transparent;
+  transition: border-color .1s;
+}
+.detect-flash.active {
+  animation: detectFlash .6s ease-out forwards;
+}
+@keyframes detectFlash {
+  0%   { border-color: var(--success); opacity: 1; }
+  100% { border-color: transparent;    opacity: 0; }
+}
+
+/* Auto-detect toggle button */
+.btn-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.auto-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: background .2s;
+  flex-shrink: 0;
+}
+.btn-auto[data-active="true"] {
+  border-color: var(--success);
+  color: var(--success);
+}
+.btn-auto[data-active="true"] .auto-dot {
+  background: var(--success);
+  box-shadow: 0 0 6px var(--success);
+  animation: dotPulse 1.4s ease-in-out infinite;
+}
+@keyframes dotPulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: .3; }
+}
+
+/* Calibration status text */
+.cal-status-text {
+  font-size: 11px;
+  color: var(--success);
+  margin-left: 8px;
+}
+
+/* Detection state indicator (right panel) */
+.detect-state {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.detect-state.listening {
+  color: var(--success);
+  border-color: rgba(0, 230, 118, .4);
+}
+.detect-state.detected {
+  color: var(--accent);
+  border-color: rgba(0, 229, 255, .4);
+}
+.ds-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+  transition: background .2s;
+}
+.detect-state.listening .ds-pulse {
+  background: var(--success);
+  animation: dotPulse 1s ease-in-out infinite;
+}
+.detect-state.detected .ds-pulse {
+  background: var(--accent);
+}
+
+/* Round history section (left panel) */
+.scoreboard-history {
+  margin-top: 8px;
+  flex-shrink: 0;
+}
+.hist-title {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--muted);
+  padding: 0 2px;
+  margin-bottom: 6px;
+}
+.hist-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  padding: 4px 8px;
+  background: var(--bg-panel);
+  border-radius: 4px;
+  margin-bottom: 3px;
+}
+.hist-row .hist-player {
+  font-weight: 700;
+  color: var(--text);
+  min-width: 50px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.hist-row .hist-throws { flex: 1; }
+.hist-row .hist-total  { font-weight: 700; color: var(--text); }
+.hist-row.busted .hist-total { color: var(--warn); }
+
